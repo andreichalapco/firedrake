@@ -119,6 +119,12 @@ def tsfc_kernel_key(form, name, parameters, number_map, interface, coffee=False,
     # FIXME Making the COFFEE parameters part of the cache key causes
     # unnecessary repeated calls to TSFC when actually only the kernel code
     # needs to be regenerated
+
+    # comm has to be part of the in memory key so that when
+    # compiling the same code on different subcommunicators we
+    # don't get deadlocks. But MPI_Comm objects are not hashable,
+    # so use comm.py2f() since this is an internal communicator and
+    # hence the C handle is stable.
     return md5((form.signature() + name
                 + str(sorted(default_parameters["coffee"].items()))
                 + str(sorted(parameters.items()))
@@ -131,17 +137,37 @@ def tsfc_kernel_key(form, name, parameters, number_map, interface, coffee=False,
 SplitKernel = collections.namedtuple("SplitKernel", ["indices",
                                                      "kinfo"])
 
+try:
+    CACHE_DIR = environ["FIREDRAKE_TSFC_KERNEL_CACHE_DIR"]
+except KeyError:
+    CACHE_DIR = path.join(tempfile.gettempdir(), f"firedrake-tsfc-kernel-cache-uid{getuid()}")
+
 @cached(LRUCache(maxsize=128), key=tsfc_kernel_key)
 def make_tsfc_kernel(form, name, parameters, number_map, interface, coffee=False, diagonal=False):
-        """A wrapper object for one or more TSFC kernels compiled from a given :class:`~ufl.classes.Form`.
+    """A wrapper object for one or more TSFC kernels compiled from a given :class:`~ufl.classes.Form`.
 
-        :arg form: the :class:`~ufl.classes.Form` from which to compile the kernels.
-        :arg name: a prefix to be applied to the compiled kernel names. This is primarily useful for debugging.
-        :arg parameters: a dict of parameters to pass to the form compiler.
-        :arg number_map: a map from local coefficient numbers
-                         to the split global coefficient numbers.
-        :arg interface: the KernelBuilder interface for TSFC (may be None)
-        """
+    :arg form: the :class:`~ufl.classes.Form` from which to compile the kernels.
+    :arg name: a prefix to be applied to the compiled kernel names. This is primarily useful for debugging.
+    :arg parameters: a dict of parameters to pass to the form compiler.
+    :arg number_map: a map from local coefficient numbers
+                     to the split global coefficient numbers.
+    :arg interface: the KernelBuilder interface for TSFC (may be None)
+    """
+    comm = form.ufl_domains()[0].comm
+    key = tsfc_kernel_key(form, name, parameters, number_map, interface,
+                          coffee=coffee, diagonal=diagonal)
+    key = key[0]  # for disk caching we should drop the communicator
+
+    filepath = os.path.join(CACHE_DIR, key[:2], key[2:])
+    try:
+        if comm.rank == 0:
+            with open(filepath, "rb") as f:
+                res = pickle.load(f)
+
+            comm.bcast(res, root=0)
+        else:
+            res = comm.bcast(None, root=0)
+    except FileNotFoundError:
         tree = tsfc_compile_form(form, prefix=name, parameters=parameters, interface=interface, coffee=coffee, diagonal=diagonal)
         kernels = []
         for kernel in tree:
@@ -162,7 +188,17 @@ def make_tsfc_kernel(form, name, parameters, number_map, interface, coffee=False
                                       pass_layer_arg=False,
                                       needs_cell_sizes=kernel.needs_cell_sizes,
                                       tsfc_kernel_args=kernel.arguments))
-        return TSFCKernel(kernels)
+        res = TSFCKernel(kernels)
+
+        if comm.rank == 0:
+            shard, disk_key = key[:2], key[2:]
+            os.makedirs(os.path.join(CACHE_DIR, shard), exist_ok=True)
+            tempfile = os.path.join(CACHE_DIR, shard, f"{disk_key}_p{os.getpid()}.tmp")
+            with open(tempfile, "wb") as f:
+                pickle.dump(res, f, protocol=pickle.HIGHEST_PROTOCOL)
+            os.rename(tempfile, filepath)
+
+    return res
 
 
 @PETSc.Log.EventDecorator()
