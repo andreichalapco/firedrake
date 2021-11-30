@@ -13,6 +13,7 @@ import finat
 import firedrake
 import numpy
 from tsfc import kernel_args
+from tsfc.finatinterface import create_element
 import ufl
 from firedrake import (assemble_expressions, extrusion_utils as eutils, matrix, parameters, solving,
                        tsfc_interface, utils)
@@ -658,14 +659,31 @@ class _AssembleWrapperKernelBuilder:
         for local_knl in local_knls:
             kinfo = local_knl.kinfo
 
+            # TODO This is a hack. Make this class take kinfo as a constructor arg
+            self.indices = local_knl.indices
+            self.kinfo = kinfo
+
             iterset = _get_iterset(self._expr, kinfo, all_integer_subdomain_ids)
 
+            domain = FormExplorer(self._expr).get_domain(self.kinfo)
+            finat_element = create_element(domain.ufl_coordinate_element())
+            extruded = domain.extruded
+
+            self.extruded = extruded
+
             # TODO This information should be available from UFL
-            extruded = iterset._extruded
             constant_layers = extruded and iterset.constant_layers
             subset = isinstance(iterset, op2.Subset)
 
-            self.extruded = extruded  # hack
+            # Icky generator so we can access the correct coefficients in order
+            def coeffs():
+                for n, split_map in kinfo.coefficient_map:
+                    c = self._expr.coefficients()[n]
+                    split_c = c.split()
+                    for c_ in (split_c[i] for i in split_map):
+                        yield c_
+            self.coeffs_iterator = iter(coeffs())
+
 
             wrapper_kernel_args = [
                 self._as_wrapper_kernel_arg(arg, kinfo.integral_type)
@@ -704,33 +722,68 @@ def _as_wrapper_kernel_arg(tsfc_arg, self, integral_type):
     raise NotImplementedError
 
 
-@_as_wrapper_kernel_arg.register(kernel_args.RankZeroKernelArg)
+@_as_wrapper_kernel_arg.register(kernel_args.CoordinatesKernelArg)
+def _(_, self, integral_type):
+    domain = FormExplorer(self._expr).get_domain(self.kinfo)
+    finat_element = create_element(domain.ufl_coordinate_element())
+    extruded = domain.extruded
+    return _make_dat_wrapper_kernel_arg(finat_element, integral_type, extruded)
+
+@_as_wrapper_kernel_arg.register(kernel_args.ConstantKernelArg)
 def _(tsfc_arg, self, integral_type):
-    return op2.GlobalWrapperKernelArg(tsfc_arg.shape)
+    coeff = next(self.coeffs_iterator)
+    ufl_element = coeff.ufl_function_space().ufl_element()
+    assert ufl_element.family() == "Real"
+    return op2.GlobalWrapperKernelArg((ufl_element.value_size(),))
 
 
-@_as_wrapper_kernel_arg.register(kernel_args.RankOneKernelArg)
+@_as_wrapper_kernel_arg.register(kernel_args.CoefficientKernelArg)
+def _(_, self, integral_type):
+    domain = FormExplorer(self._expr).get_domain(self.kinfo)
+    extruded = domain.extruded
+    coeff = next(self.coeffs_iterator)
+    finat_element = create_element(coeff.ufl_function_space().ufl_element())
+    return _make_dat_wrapper_kernel_arg(finat_element, integral_type, extruded)
+
+
+
+@_as_wrapper_kernel_arg.register(kernel_args.ScalarOutputKernelArg)
 def _(tsfc_arg, self, integral_type):
-    elem = tsfc_arg._elem
-    if elem.is_mixed:
+    return op2.GlobalWrapperKernelArg((1,))
+
+@_as_wrapper_kernel_arg.register(kernel_args.VectorOutputKernelArg)
+def _(tsfc_arg, self, integral_type):
+    i, = self.indices
+
+    if self._diagonal:
+        test, _ = self._expr.arguments()
+    else:
+        test, = self._expr.arguments()
+
+    V = test.ufl_function_space()
+    if i is not None:
+        V = V[i]
+    elem = create_element(V.ufl_element())
+    handler = _ElementHandler(elem)
+    if handler.is_mixed:
         subargs = []
-        for el in elem.split():
-            subargs.append(_make_dat_wrapper_kernel_arg(el, integral_type, self.extruded))
+        for el in handler.split():
+            subargs.append(_make_dat_wrapper_kernel_arg(el._elem, integral_type, self.extruded))
         return op2.MixedDatWrapperKernelArg(tuple(subargs))
     else:
         return _make_dat_wrapper_kernel_arg(elem, integral_type, self.extruded)
 
-def _make_dat_wrapper_kernel_arg(elem, integral_type, extruded=False):
-    map_id = _get_map_id(elem._elem, integral_type)
+def _make_dat_wrapper_kernel_arg(finat_element, integral_type, extruded=False):
+    map_id = _get_map_id(finat_element, integral_type)
 
-    finat_element = _as_scalar_element(elem._elem)
-    real_tensorproduct = eutils.is_real_tensor_product_element(finat_element)
-    if isinstance(finat_element, finat.TensorFiniteElement):
-        finat_element = finat_element.base_element
-    entity_dofs = preprocess_finat_element(finat_element)
+    scalar_element = _as_scalar_element(finat_element)
+    real_tensorproduct = eutils.is_real_tensor_product_element(scalar_element)
+    if isinstance(scalar_element, finat.TensorFiniteElement):
+        scalar_element = scalar_element.base_element
+    entity_dofs = preprocess_finat_element(scalar_element)
     # offset only valid for extruded
     if extruded:
-        offset = tuple(eutils.calc_offset(finat_element.cell, entity_dofs, finat_element.space_dimension(), real_tensorproduct))
+        offset = tuple(eutils.calc_offset(scalar_element.cell, entity_dofs, scalar_element.space_dimension(), real_tensorproduct))
         # For interior facet integrals we double the size of the offset array
         if integral_type in {"interior_facet", "interior_facet_vert"}:
             offset += offset
@@ -738,17 +791,55 @@ def _make_dat_wrapper_kernel_arg(elem, integral_type, extruded=False):
     else:
         offset = None
 
-    map_arg = op2.MapWrapperKernelArg(map_id, elem.node_shape, offset)
-    return op2.DatWrapperKernelArg(elem.tensor_shape, map_arg)
+    handler = _ElementHandler(finat_element)
+    dim = handler.tensor_shape
+    arity = handler.node_shape
+    if integral_type in {"interior_facet", "interior_facet_vert"}:
+        arity *= 2
 
+    map_arg = op2.MapWrapperKernelArg(map_id, arity, offset)
+    return op2.DatWrapperKernelArg(dim, map_arg)
 
-@_as_wrapper_kernel_arg.register(kernel_args.FacetKernelArg)
+class _ElementHandler:
+
+    def __init__(self, elem):
+        self._elem = elem
+
+    @property
+    def node_shape(self):
+        if self._is_tensor_element:
+            shape = self._elem.index_shape[:-len(self.tensor_shape)]
+        else:
+            shape = self._elem.index_shape
+
+        shape = numpy.prod(shape, dtype=int)
+        return shape
+
+    @property
+    def tensor_shape(self):
+        return self._elem._shape if self._is_tensor_element else (1,)
+
+    @property
+    def is_mixed(self):
+        return isinstance(self._elem, finat.EnrichedElement) and self._elem.is_mixed
+
+    def split(self):
+        if not self.is_mixed:
+            raise ValueError("Cannot split a non-mixed element")
+
+        return tuple([type(self)(subelem.element) for subelem in self._elem.elements])
+
+    @property
+    def _is_tensor_element(self):
+        return isinstance(self._elem, finat.TensorFiniteElement)
+
+# @_as_wrapper_kernel_arg.register(kernel_args.FacetKernelArg)
 def _(tsfc_arg, self, integral_type):
     # These are directly addressed (no map)
     return op2.DatWrapperKernelArg(tsfc_arg.shape)
 
 
-@_as_wrapper_kernel_arg.register(CellFacetKernelArg)
+# @_as_wrapper_kernel_arg.register(CellFacetKernelArg)
 def _(tsfc_arg, self, integral_type):
     return op2.DatWrapperKernelArg(tsfc_arg.shape)
 
@@ -758,41 +849,63 @@ def _(tsfc_arg, self, integral_type):
     # this is taken largely from mesh.py where we observe that the function space is
     # DG0.
     from ufl import FiniteElement
-    from tsfc.finatinterface import create_element
+    raise NotImplementedError("This may break")
     ufl_element = FiniteElement("DG", cell=self._expr.ufl_domain().ufl_cell(), degree=0)
-    finat_element = _as_scalar_element(create_element(ufl_element))
-    map_id = _get_map_id(finat_element, False, integral_type)
-    map_arg = op2.MapWrapperKernelArg(map_id, tsfc_arg.node_shape)
-    return op2.DatWrapperKernelArg(tsfc_arg.shape, map_arg)
+    finat_element = create_element(ufl_element)
+    scalar_element = _as_scalar_element(finat_element)
+    map_id = _get_map_id(scalar_element, False, integral_type)
+
+    handler = _ElementHandler(finat_element)
+    dim = handler.tensor_shape
+    arity = handler.node_shape
+    if integral_type in {"interior_facet", "interior_facet_vert"}:
+        arity *= 2
+    map_arg = op2.MapWrapperKernelArg(map_id, arity)
+    return op2.DatWrapperKernelArg(dim, map_arg)
 
 
-@_as_wrapper_kernel_arg.register(kernel_args.RankTwoKernelArg)
+@_as_wrapper_kernel_arg.register(kernel_args.MatrixOutputKernelArg)
 def _(tsfc_arg, self, integral_type):
-    relem = tsfc_arg._relem
-    celem = tsfc_arg._celem
+    i, j = self.indices
+    test, trial = self._expr.arguments()
 
-    if relem.is_mixed:
-        if celem.is_mixed:
+    Vr = test.ufl_function_space()
+    Vc = trial.ufl_function_space()
+
+    if i is not None and j is not None:
+        Vr = Vr[i]
+        Vc = Vc[j]
+    else:
+        assert i is None and j is None
+
+    relem = create_element(Vr.ufl_element())
+    celem = create_element(Vc.ufl_element())
+
+    rhandler= _ElementHandler(relem)
+    chandler= _ElementHandler(celem)
+
+    if rhandler.is_mixed:
+        if chandler.is_mixed:
             subargs = []
-            shape = len(relem.split()), len(celem.split())
-            for rel, cel in itertools.product(relem.split(), celem.split()):
+            shape = len(rhandler.split()), len(chandler.split())
+            for rel, cel in itertools.product(rhandler.split(), chandler.split()):
                 subargs.append(_make_mat_wrapper_kernel_arg(rel, cel, integral_type, self.extruded))
             return op2.MixedMatWrapperKernelArg(tuple(subargs), shape)
         else:
             subargs = []
-            shape = len(relem.split()), 1
-            for rel in relem.split():
-                subargs.append(_make_mat_wrapper_kernel_arg(rel, celem, integral_type, self.extruded))
+            shape = len(rhandler.split()), 1
+            for rel in rhandler.split():
+                subargs.append(_make_mat_wrapper_kernel_arg(rel, chandler, integral_type, self.extruded))
             return op2.MixedMatWrapperKernelArg(tuple(subargs), shape)
     else:
-        if celem.is_mixed:
-            shape = 1, len(celem.split())
+        if chandler.is_mixed:
+            shape = 1, len(chandler.split())
             subargs = []
-            for cel in celem.split():
-                subargs.append(_make_mat_wrapper_kernel_arg(relem, cel, integral_type, self.extruded))
+            for cel in chandler.split():
+                subargs.append(_make_mat_wrapper_kernel_arg(rhandler, cel, integral_type, self.extruded))
             return op2.MixedMatWrapperKernelArg(tuple(subargs), shape)
         else:
-            return _make_mat_wrapper_kernel_arg(relem, celem, integral_type, self.extruded)
+            return _make_mat_wrapper_kernel_arg(rhandler, chandler, integral_type, self.extruded)
 
 
 def _make_mat_wrapper_kernel_arg(relem, celem, integral_type, extruded=False):
@@ -841,6 +954,15 @@ def _make_mat_wrapper_kernel_arg(relem, celem, integral_type, extruded=False):
 def _as_scalar_element(elem):
     # This is done to mirror what happens in functionspacedata.py
     return elem.base_element if isinstance(elem, finat.TensorFiniteElement) else elem
+
+
+class FormExplorer:
+
+    def __init__(self, form):
+        self._form = form
+
+    def get_domain(self, kinfo):
+        return self._form.ufl_domains()[kinfo.domain_number]
 
 
 def _get_map_id(finat_element, integral_type):
@@ -948,8 +1070,10 @@ class ParloopExecutor:
             raise RuntimeError("Integral measure does not match measure of all "
                                "coefficients/arguments")
 
-    def _get_mesh(self, expr_kernel):
-        return self._form.ufl_domains()[expr_kernel.kinfo.domain_number]
+
+    def _get_mesh(self, tsfc_kernel):
+        return FormExplorer(self._form).get_domain(tsfc_kernel.kinfo)
+
 
     @staticmethod
     def _get_map(func_space, integral_type):

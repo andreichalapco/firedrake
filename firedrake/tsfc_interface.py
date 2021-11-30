@@ -172,7 +172,7 @@ def make_tsfc_kernel(form, name, parameters, number_map, interface, coffee=False
         kernels = []
         for kernel in tree:
             # Set optimization options
-            opts = default_parameters["coffee"]
+            opts = default_parameters["coffee"].copy()
             # Unwind coefficient numbering
             numbers = tuple(number_map[c] for c in kernel.coefficient_numbers)
             pyop2_kernel = pyop2_interface.as_pyop2_local_kernel(

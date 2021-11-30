@@ -5,6 +5,8 @@ classes for attaching extra information to instances of these.
 """
 
 from collections import OrderedDict
+from dataclasses import dataclass
+from typing import Optional
 
 import numpy
 
@@ -15,6 +17,15 @@ from pyop2 import op2
 from firedrake import dmhooks, utils
 from firedrake.functionspacedata import get_shared_data, create_element
 from firedrake.petsc import PETSc
+
+
+def needs_cargo(func):
+    def wrapper(self, *args, **kwargs):
+        if self.cargo is not None:
+            return func(self, *args, **kwargs)
+        else:
+            raise TypeError("Operation is not available for stripped forms")
+    return wrapper
 
 
 class WithGeometry(ufl.FunctionSpace):
@@ -31,28 +42,65 @@ class WithGeometry(ufl.FunctionSpace):
         geometry to.
     :arg mesh: The mesh with geometric information to use.
     """
-    def __init__(self, function_space, mesh):
+    def __init__(self, mesh, element, component=None, cargo=None):
+        assert component is None or isinstance(component, int)
+        assert cargo is None or isinstance(cargo, FunctionSpaceCargo)
+
+        super().__init__(mesh, element)
+        self.component = component
+        self.cargo = cargo
+
+    @classmethod
+    def create(cls, function_space, mesh):
         function_space = function_space.topological
         assert mesh.topology is function_space.mesh()
         assert mesh.topology is not mesh
 
         element = function_space.ufl_element().reconstruct(cell=mesh.ufl_cell())
-        super(WithGeometry, self).__init__(mesh, element)
-        self.topological = function_space
+
+        topological = function_space
+        component = function_space.component
 
         if function_space.parent is not None:
-            self.parent = WithGeometry(function_space.parent, mesh)
+            parent = WithGeometry.create(function_space.parent, mesh)
         else:
-            self.parent = None
+            parent = None
 
-    @utils.cached_property
+        cargo = FunctionSpaceCargo(topological, parent)
+        return cls(mesh, element, component=component, cargo=cargo)
+
+    # @utils.cached_property
+    # def finat_element(self):
+    #     raise NotImplementedError("Make sure this is the tensor-valued version")
+    #     return create_element(self.ufl_element())
+
+    # @utils.cached_property
+    # def scalar_finat_element(self):
+    #     raise NotImplementedError
+
+    def _ufl_signature_data_(self, *args, **kwargs):
+        return (type(self),
+                self.component,
+                super()._ufl_signature_data_(*args, **kwargs))
+
+    @property
+    @needs_cargo
+    def parent(self):
+        return self.cargo.parent
+
+    @property
+    @needs_cargo
+    def topological(self):
+        return self.cargo.topological
+
+    @utils.cached_property  # TODO
     def _split(self):
-        return tuple(WithGeometry(subspace, self.mesh())
+        return tuple(WithGeometry.create(subspace, self.mesh())
                      for subspace in self.topological.split())
 
     mesh = ufl.FunctionSpace.ufl_domain
 
-    @utils.cached_property
+    @property
     def _ad_parent_space(self):
         return self.parent
 
@@ -69,10 +117,10 @@ class WithGeometry(ufl.FunctionSpace):
         r"""Split into a tuple of constituent spaces."""
         return self._split
 
-    @utils.cached_property
+    @property
     def _components(self):
         if len(self) == 1:
-            return tuple(WithGeometry(self.topological.sub(i), self.mesh())
+            return tuple(WithGeometry.create(self.topological.sub(i), self.mesh())
                          for i in range(self.value_size))
         else:
             return self._split
@@ -87,7 +135,7 @@ class WithGeometry(ufl.FunctionSpace):
             raise IndexError("Invalid component %d, not in [0, %d)" % (i, bound))
         return self._components[i]
 
-    @utils.cached_property
+    @utils.cached_property  # TODO
     def dm(self):
         dm = self._dm()
         dmhooks.set_function_space(dm, self)
@@ -790,7 +838,7 @@ class ProxyFunctionSpace(FunctionSpace):
         topology = mesh.topology
         self = super(ProxyFunctionSpace, cls).__new__(cls)
         if mesh is not topology:
-            return WithGeometry(self, mesh)
+            return WithGeometry.create(self, mesh)
         else:
             return self
 
@@ -949,3 +997,10 @@ class RealFunctionSpace(FunctionSpace):
     def local_to_global_map(self, bcs, lgmap=None):
         assert len(bcs) == 0
         return None
+
+
+@dataclass
+class FunctionSpaceCargo:
+
+    topological: FunctionSpace
+    parent: Optional[WithGeometry]
