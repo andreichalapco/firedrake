@@ -745,10 +745,19 @@ def _(_, self, integral_type):
     return _make_dat_wrapper_kernel_arg(finat_element, integral_type, extruded)
 
 
+@_as_wrapper_kernel_arg.register(kernel_args.CellSizesKernelArg)
+def _as_wrapper_kernel_arg_cell_sizes(_, self, integral_type):
+    domain = FormExplorer(self._expr).get_domain(self.kinfo)
+    # See set_cell_sizes from tsfc.kernel_interface.firedrake_loopy
+    ufl_element = ufl.FiniteElement("P", domain.ufl_cell(), 1)
+    finat_element = create_element(ufl_element)
+    return _make_dat_wrapper_kernel_arg(finat_element, integral_type, domain.extruded)
+
 
 @_as_wrapper_kernel_arg.register(kernel_args.ScalarOutputKernelArg)
 def _(_, self, integral_type):
     return op2.GlobalWrapperKernelArg((1,))
+
 
 @_as_wrapper_kernel_arg.register(kernel_args.VectorOutputKernelArg)
 def _(_, self, integral_type):
@@ -871,6 +880,11 @@ def _(_, self, integral_type):
         arity *= 2
     map_arg = op2.MapWrapperKernelArg(map_id, arity)
     return op2.DatWrapperKernelArg(dim, map_arg)
+
+
+@_as_wrapper_kernel_arg.register(LayerCountKernelArg)
+def _as_wrapper_kernel_arg_layer_count(_, self, integral_type):
+    return op2.GlobalWrapperKernelArg((1,))
 
 
 @_as_wrapper_kernel_arg.register(kernel_args.MatrixOutputKernelArg)
