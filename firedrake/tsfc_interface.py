@@ -158,16 +158,20 @@ def make_tsfc_kernel(form, name, parameters, number_map, interface, coffee=False
                           coffee=coffee, diagonal=diagonal)
     key = key[0]  # for disk caching we should drop the communicator
 
+    rank = comm.rank
+
     filepath = os.path.join(CACHE_DIR, key[:2], key[2:])
-    try:
-        if comm.rank == 0:
+    res = None
+    if comm.rank == 0:
+        if os.path.exists(filepath):
             with open(filepath, "rb") as f:
                 res = pickle.load(f)
 
-            comm.bcast(res, root=0)
-        else:
-            res = comm.bcast(None, root=0)
-    except FileNotFoundError:
+        comm.bcast(res, root=0)
+    else:
+        res = comm.bcast(None, root=0)
+
+    if res is None:
         tree = tsfc_compile_form(form, prefix=name, parameters=parameters, interface=interface, coffee=coffee, diagonal=diagonal)
         kernels = []
         for kernel in tree:
