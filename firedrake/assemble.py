@@ -666,7 +666,6 @@ class _AssembleWrapperKernelBuilder:
             iterset = _get_iterset(self._expr, kinfo, all_integer_subdomain_ids)
 
             domain = FormExplorer(self._expr).get_domain(self.kinfo)
-            finat_element = create_element(domain.ufl_coordinate_element())
             extruded = domain.extruded
 
             self.extruded = extruded
@@ -730,7 +729,7 @@ def _(_, self, integral_type):
     return _make_dat_wrapper_kernel_arg(finat_element, integral_type, extruded)
 
 @_as_wrapper_kernel_arg.register(kernel_args.ConstantKernelArg)
-def _(tsfc_arg, self, integral_type):
+def _(_, self, integral_type):
     coeff = next(self.coeffs_iterator)
     ufl_element = coeff.ufl_function_space().ufl_element()
     assert ufl_element.family() == "Real"
@@ -748,11 +747,11 @@ def _(_, self, integral_type):
 
 
 @_as_wrapper_kernel_arg.register(kernel_args.ScalarOutputKernelArg)
-def _(tsfc_arg, self, integral_type):
+def _(_, self, integral_type):
     return op2.GlobalWrapperKernelArg((1,))
 
 @_as_wrapper_kernel_arg.register(kernel_args.VectorOutputKernelArg)
-def _(tsfc_arg, self, integral_type):
+def _(_, self, integral_type):
     i, = self.indices
 
     if self._diagonal:
@@ -833,27 +832,37 @@ class _ElementHandler:
     def _is_tensor_element(self):
         return isinstance(self._elem, finat.TensorFiniteElement)
 
-# @_as_wrapper_kernel_arg.register(kernel_args.FacetKernelArg)
-def _(tsfc_arg, self, integral_type):
-    # These are directly addressed (no map)
-    return op2.DatWrapperKernelArg(tsfc_arg.shape)
+@_as_wrapper_kernel_arg.register(kernel_args.ExteriorFacetKernelArg)
+def _(_, self, integral_type):
+    return op2.DatWrapperKernelArg((1,))
 
 
-# @_as_wrapper_kernel_arg.register(CellFacetKernelArg)
-def _(tsfc_arg, self, integral_type):
-    return op2.DatWrapperKernelArg(tsfc_arg.shape)
+@_as_wrapper_kernel_arg.register(kernel_args.InteriorFacetKernelArg)
+def _(_, self, integral_type):
+    return op2.DatWrapperKernelArg((2,))
+
+
+@_as_wrapper_kernel_arg.register(CellFacetKernelArg)
+def _(_, self, integral_type):
+    # TODO Share this functionality with Slate kernel_builder.py
+    domain = FormExplorer(self._expr).get_domain(self.kinfo)
+    if domain.extruded:
+        # TODO This is not sufficiently stripped
+        num_facets = domain._base_mesh.ufl_cell().num_facets()
+    else:
+        num_facets = domain.ufl_cell().num_facets()
+    return op2.DatWrapperKernelArg((num_facets, 2))
 
 
 @_as_wrapper_kernel_arg.register(kernel_args.CellOrientationsKernelArg)
-def _(tsfc_arg, self, integral_type):
+def _(_, self, integral_type):
     # this is taken largely from mesh.py where we observe that the function space is
     # DG0.
     from ufl import FiniteElement
-    raise NotImplementedError("This may break")
     ufl_element = FiniteElement("DG", cell=self._expr.ufl_domain().ufl_cell(), degree=0)
     finat_element = create_element(ufl_element)
     scalar_element = _as_scalar_element(finat_element)
-    map_id = _get_map_id(scalar_element, False, integral_type)
+    map_id = _get_map_id(scalar_element, integral_type)
 
     handler = _ElementHandler(finat_element)
     dim = handler.tensor_shape
@@ -865,7 +874,7 @@ def _(tsfc_arg, self, integral_type):
 
 
 @_as_wrapper_kernel_arg.register(kernel_args.MatrixOutputKernelArg)
-def _(tsfc_arg, self, integral_type):
+def _(_, self, integral_type):
     i, j = self.indices
     test, trial = self._expr.arguments()
 
@@ -941,12 +950,25 @@ def _make_mat_wrapper_kernel_arg(relem, celem, integral_type, extruded=False):
 
     ###
 
-    rmap_arg = op2.MapWrapperKernelArg(rmap_id, relem.node_shape, roffset)
-    cmap_arg = op2.MapWrapperKernelArg(cmap_id, celem.node_shape, coffset)
+    rdim = relem.tensor_shape
+    rarity = relem.node_shape
+    if integral_type in {"interior_facet", "interior_facet_vert"}:
+        rarity *= 2
+    rmap_arg = op2.MapWrapperKernelArg(rmap_id, rarity, roffset)
+
+    ###
+
+    cdim = celem.tensor_shape
+    carity = celem.node_shape
+    if integral_type in {"interior_facet", "interior_facet_vert"}:
+        carity *= 2
+    cmap_arg = op2.MapWrapperKernelArg(cmap_id, carity, coffset)
+
+    ###
 
     # PyOP2 matrix objects have scalar dims so we cope with that here...
-    rdim = (numpy.prod(relem.tensor_shape, dtype=int),)
-    cdim = (numpy.prod(celem.tensor_shape, dtype=int),)
+    rdim = (numpy.prod(rdim, dtype=int),)
+    cdim = (numpy.prod(cdim, dtype=int),)
 
     return op2.MatWrapperKernelArg(((rdim+cdim,),), (rmap_arg, cmap_arg))
 
@@ -1102,7 +1124,7 @@ def _as_parloop_arg(tsfc_arg, self, wrapper_kernel, **kwargs):
 
 
 @_as_parloop_arg.register(kernel_args.CoordinatesKernelArg)
-def _(tsfc_arg, self, wrapper_kernel, **kwargs):
+def _as_parloop_arg_coordinates(_, self, wrapper_kernel, **kwargs):
     kinfo = wrapper_kernel.tsfc_kernel.kinfo
     mesh = self._get_mesh(wrapper_kernel.tsfc_kernel)
     func = mesh.coordinates
@@ -1111,7 +1133,7 @@ def _(tsfc_arg, self, wrapper_kernel, **kwargs):
 
 
 @_as_parloop_arg.register(kernel_args.CellOrientationsKernelArg)
-def _(tsfc_arg, self, wrapper_kernel, **kwargs):
+def _as_parloop_arg_cell_orientations(_, self, wrapper_kernel, **kwargs):
     kinfo = wrapper_kernel.tsfc_kernel.kinfo
     mesh = self._get_mesh(wrapper_kernel.tsfc_kernel)
     func = mesh.cell_orientations()
@@ -1120,7 +1142,7 @@ def _(tsfc_arg, self, wrapper_kernel, **kwargs):
 
 
 @_as_parloop_arg.register(kernel_args.CellSizesKernelArg)
-def _(tsfc_arg, self, wrapper_kernel, **kwargs):
+def _(_, self, wrapper_kernel, **kwargs):
     kinfo = wrapper_kernel.tsfc_kernel.kinfo
     mesh = self._get_mesh(wrapper_kernel.tsfc_kernel)
     func = mesh.cell_sizes
@@ -1129,31 +1151,31 @@ def _(tsfc_arg, self, wrapper_kernel, **kwargs):
 
 
 @_as_parloop_arg.register(kernel_args.ExteriorFacetKernelArg)
-def _(tsfc_arg, self, wrapper_kernel, **kwargs):
+def _(_, self, wrapper_kernel, **kwargs):
     mesh = self._get_mesh(wrapper_kernel.tsfc_kernel)
     return op2.DatParloopArg(mesh.exterior_facets.local_facet_dat)
 
 
 @_as_parloop_arg.register(kernel_args.InteriorFacetKernelArg)
-def _(tsfc_arg, self, wrapper_kernel, **kwargs):
+def _(_, self, wrapper_kernel, **kwargs):
     mesh = self._get_mesh(wrapper_kernel.tsfc_kernel)
     return op2.DatParloopArg(mesh.interior_facets.local_facet_dat)
 
 
 @_as_parloop_arg.register(CellFacetKernelArg)
-def _(tsfc_arg, self, wrapper_kernel, **kwargs):
+def _(_, self, wrapper_kernel, **kwargs):
     mesh = self._get_mesh(wrapper_kernel.tsfc_kernel)
     return op2.DatParloopArg(mesh.cell_to_facets)
 
 
 @_as_parloop_arg.register(kernel_args.ConstantKernelArg)
-def _(tsfc_arg, self, wrapper_kernel, **kwargs):
+def _(_, self, wrapper_kernel, **kwargs):
     coeff = next(self.coeffs_iterator)
     return op2.GlobalParloopArg(coeff.dat)
 
 
 @_as_parloop_arg.register(kernel_args.CoefficientKernelArg)
-def _(tsfc_arg, self, wrapper_kernel, **kwargs):
+def _(_, self, wrapper_kernel, **kwargs):
     kinfo = wrapper_kernel.tsfc_kernel.kinfo
 
     coeff = next(self.coeffs_iterator)
@@ -1161,13 +1183,13 @@ def _(tsfc_arg, self, wrapper_kernel, **kwargs):
 
 
 @_as_parloop_arg.register(LayerCountKernelArg)
-def _(tsfc_arg, self, wrapper_kernel, **kwargs):
-    glob = op2.Global(tsfc_arg.shape, self._iterset.layers-2, dtype=tsfc_arg.dtype)
+def _(_, self, wrapper_kernel, **kwargs):
+    glob = op2.Global(LayerCountKernelArg.shape, self._iterset.layers-2, dtype=LayerCountKernelArg.dtype)
     return op2.GlobalParloopArg(glob)
 
 
 @_as_parloop_arg.register(kernel_args.ScalarOutputKernelArg)
-def _(tsfc_arg, self, wrapper_kernel, **kwargs):
+def _(_, self, wrapper_kernel, **kwargs):
     kinfo = wrapper_kernel.tsfc_kernel.kinfo
     # For real assembly self._tensor is a Function, for normal assembly it is a Global.
     if isinstance(self._tensor, op2.Global):
@@ -1198,7 +1220,7 @@ def _(tsfc_arg, self, wrapper_kernel, **kwargs):
 
 
 @_as_parloop_arg.register(kernel_args.VectorOutputKernelArg)
-def _(tsfc_arg, self, wrapper_kernel, **kwargs):
+def _(_, self, wrapper_kernel, **kwargs):
     tensor = self._tensor
     kinfo = wrapper_kernel.tsfc_kernel.kinfo
 
@@ -1231,7 +1253,7 @@ def _(tsfc_arg, self, wrapper_kernel, **kwargs):
 
 
 @_as_parloop_arg.register(kernel_args.MatrixOutputKernelArg)
-def _(tsfc_arg, self, wrapper_kernel, *, lgmaps):
+def _(_, self, wrapper_kernel, *, lgmaps):
     tensor = self._tensor
     kinfo = wrapper_kernel.tsfc_kernel.kinfo
     i, j = wrapper_kernel.tsfc_kernel.indices

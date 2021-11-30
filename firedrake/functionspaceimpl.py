@@ -297,7 +297,7 @@ class WithGeometry(ufl.FunctionSpace):
         return self._shared_data.boundary_nodes(self, sub_domain)
 
     def collapse(self):
-        return type(self)(self.topological.collapse(), self.mesh())
+        return type(self).create(self.topological.collapse(), self.mesh())
 
 
 class FunctionSpace(object):

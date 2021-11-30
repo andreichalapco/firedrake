@@ -706,7 +706,7 @@ class LocalLoopyKernelBuilder(object):
 
         coords_el = tsfc.finatinterface.create_element(coords.ufl_element())
         isreal = coords.ufl_element().family() == "Real"
-        args = [kernel_args.CoordinatesKernelArg(coords_el, isreal, dtype=self.tsfc_parameters["scalar_type"])]
+        args = [kernel_args.CoordinatesKernelArg((coords_el.index_shape,), dtype=self.tsfc_parameters["scalar_type"])]
 
         if self.bag.needs_cell_orientations:
             ori_extent = self.extent(self.expression.ufl_domain().cell_orientations())
@@ -717,7 +717,7 @@ class LocalLoopyKernelBuilder(object):
             finat_element = create_element(myelem)
             isreal = myelem.family() == "Real"
             args.append(kernel_args.CellSizesKernelArg(
-                        finat_element, isreal, dtype=self.tsfc_parameters["scalar_type"]))
+                        (finat_element.index_shape,), dtype=self.tsfc_parameters["scalar_type"]))
 
         for coeff, val in self.bag.coefficients.items():
             if isinstance(val, OrderedDict):
@@ -726,7 +726,7 @@ class LocalLoopyKernelBuilder(object):
                     finat_element = create_element(ufl_element)
                     isreal = ufl_element.family() == "Real"
                     arg = kernel_args.CoefficientKernelArg(
-                        name, finat_element, isreal, dtype=self.tsfc_parameters["scalar_type"]
+                        name, (finat_element.index_shape,), dtype=self.tsfc_parameters["scalar_type"]
                     )
                     args.append(arg)
             else:
@@ -739,8 +739,7 @@ class LocalLoopyKernelBuilder(object):
                 else:
                     finat_element = create_element(coeff.ufl_element())
                     arg = kernel_args.CoefficientKernelArg(
-                        name, finat_element, False,
-                        dtype=self.tsfc_parameters["scalar_type"]
+                        name, (finat_element.index_shape,), dtype=self.tsfc_parameters["scalar_type"]
                     )
                 args.append(arg)
 

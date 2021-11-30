@@ -184,19 +184,18 @@ def generate_loopy_kernel(slate_expr, compiler_parameters=None):
     elif len(arguments) == 1:
         argument, = arguments
         el = create_element(argument.ufl_element())
-        isreal = argument.ufl_element().family() == "Real"
-        output_arg = kernel_args.VectorOutputKernelArg(el, isreal, dtype=scalar_type)
+        output_arg = kernel_args.VectorOutputKernelArg((el.index_shape,), dtype=scalar_type)
     elif len(arguments) == 2:
         rargument, cargument = arguments
         rufl = rargument.ufl_element()
         rel = create_element(rufl)
-        risreal = rufl.family() == "Real"
 
         cufl = cargument.ufl_element()
         cel = create_element(cufl)
-        cisreal = cufl.family() == "Real"
 
-        output_arg = kernel_args.MatrixOutputKernelArg(rel, risreal, cel, cisreal, dtype=scalar_type)
+        shapes = tuple(e.index_shape for e in [rel, cel])
+
+        output_arg = kernel_args.MatrixOutputKernelArg(shapes, dtype=scalar_type)
     else:
         raise AssertionError
 
