@@ -818,7 +818,7 @@ def _make_dat_wrapper_kernel_arg(finat_element, integral_type, extruded=False):
     entity_dofs = scalar_element.entity_dofs()
     # offset only valid for extruded
     if extruded:
-        offset = tuple(eutils.calc_offset(scalar_element.cell, entity_dofs, scalar_element.space_dimension(), real_tensorproduct))
+        offset = tuple(eutils.calculate_dof_offset(scalar_element))
         # For interior facet integrals we double the size of the offset array
         if integral_type in {"interior_facet", "interior_facet_vert"}:
             offset += offset
@@ -968,7 +968,7 @@ def _make_mat_wrapper_kernel_arg(relem, celem, integral_type, extruded=False):
     real_tensorproduct = eutils.is_real_tensor_product_element(finat_element)
     entity_dofs = finat_element.entity_dofs()
     if extruded:
-        roffset = tuple(eutils.calc_offset(finat_element.cell, entity_dofs, finat_element.space_dimension(), real_tensorproduct))
+        roffset = tuple(eutils.calculate_dof_offset(finat_element))
         # For interior facet integrals we double the size of the offset array
         if integral_type in {"interior_facet", "interior_facet_vert"}:
             roffset *= 2
@@ -981,7 +981,7 @@ def _make_mat_wrapper_kernel_arg(relem, celem, integral_type, extruded=False):
     real_tensorproduct = eutils.is_real_tensor_product_element(finat_element)
     entity_dofs = finat_element.entity_dofs()
     if extruded:
-        coffset = tuple(eutils.calc_offset(finat_element.cell, entity_dofs, finat_element.space_dimension(), real_tensorproduct))
+        coffset = tuple(eutils.calculate_dof_offset(finat_element))
         # For interior facet integrals we double the size of the offset array
         if integral_type in {"interior_facet", "interior_facet_vert"}:
             coffset *= 2

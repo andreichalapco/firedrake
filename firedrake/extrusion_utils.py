@@ -1,4 +1,5 @@
 import collections
+import functools
 import itertools
 import numpy
 import islpy as isl
@@ -319,23 +320,31 @@ def entity_closures(cell):
     return closure
 
 
-def calc_offset(cell, entity_dofs, ndofs, real_tensorproduct=False):
-    """Returns the offset between the neighbouring cells of a
+@functools.lru_cache
+def calculate_dof_offset(finat_element):
+    """Return the offset between the neighbouring cells of a
     column for each DoF.
 
-    :arg entity_dofs: FInAT element entity DoFs
-    :arg ndofs: number of DoFs in the FInAT element
+    :arg finat_element: A FInAT element.
+    :returns: A numpy array containing the offset for each DoF.
     """
-    entity_offset = [0] * (1 + cell.get_dimension()[0])
-    for (b, v), entities in entity_dofs.items():
+    # scalar-valued elements only
+    if isinstance(finat_element, finat.TensorFiniteElement):
+        finat_element = finat_element.base_element
+
+    dof_offset = numpy.zeros(finat_element.space_dimension(), dtype=IntType)
+
+    if is_real_tensor_product_element(finat_element):
+        return dof_offset
+
+    entity_offset = [0] * (1 + finat_element.cell.get_dimension()[0])
+    for (b, v), entities in finat_element.entity_dofs().items():
         entity_offset[b] += len(entities[0])
 
-    dof_offset = numpy.zeros(ndofs, dtype=IntType)
-    if not real_tensorproduct:
-        for (b, v), entities in entity_dofs.items():
-            for dof_indices in entities.values():
-                for i in dof_indices:
-                    dof_offset[i] = entity_offset[b]
+    for (b, v), entities in finat_element.entity_dofs().items():
+        for dof_indices in entities.values():
+            for i in dof_indices:
+                dof_offset[i] = entity_offset[b]
     return dof_offset
 
 

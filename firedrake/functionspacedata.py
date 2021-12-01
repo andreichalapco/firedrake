@@ -196,23 +196,6 @@ def get_map_cache(mesh, key):
 
 
 @cached
-def get_dof_offset(mesh, key, finat_element, entity_dofs, ndof):
-    """Get the dof offsets.
-
-    :arg mesh: The mesh to use.
-    :arg key: a (entity_dofs_key, real_tensorproduct) tuple where
-        entity_dofs_key is Canonicalised entity_dofs
-        (see :func:`entity_dofs_key`); real_tensorproduct is True if the
-        function space is a degenerate fs x Real tensorproduct.
-    :arg entity_dofs: The FInAT entity_dofs dict.
-    :arg ndof: The number of dofs (the FInAT space_dimension).
-    :returns: A numpy array of dof offsets (extruded) or ``None``.
-    """
-    _, real_tensorproduct = key
-    return eutils.calc_offset(finat_element.cell, entity_dofs, ndof, real_tensorproduct)
-
-
-@cached
 def get_boundary_masks(mesh, key, finat_element):
     """Get masks for facet dofs.
 
@@ -447,7 +430,7 @@ class FunctionSpaceData(object):
         # TODO This is quite a janky way to check this. Could just look at type(mesh) or
         # the ufl domain if I add the right metadata.
         if isinstance(mesh, mesh_mod.ExtrudedMeshTopology):
-            self.offset = get_dof_offset(mesh, (edofs_key, real_tensorproduct), finat_element, entity_dofs, finat_element.space_dimension())
+            self.offset = eutils.calculate_dof_offset(finat_element)
         else:
             self.offset = None
         self.entity_node_lists = get_entity_node_lists(mesh, (edofs_key, real_tensorproduct, eperm_key), entity_dofs, entity_permutations, global_numbering, self.offset)
