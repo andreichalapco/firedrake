@@ -403,21 +403,6 @@ def entity_permutations_key(entity_permutations):
     return key
 
 
-def preprocess_finat_element(finat_element):
-    """Preprocess a UFL element for descretised representation
-
-    :arg mesh: The MeshTopology object
-    :arg ufl_element: The UFL element
-    :returns: A tuple of the FInAT element, entity_dofs, nodes_per_entity,
-        and real_tensorproduct derived from ufl_element.
-    """
-    if isinstance(finat_element, finat.EnrichedElement) and finat_element.is_mixed:
-        raise ValueError("Can't create FunctionSpace for MixedElement")
-
-    entity_dofs = finat_element.entity_dofs()
-    return entity_dofs
-
-
 class FunctionSpaceData(object):
     """Function spaces with the same entity dofs share data.  This class
     stores that shared data.  It is cached on the mesh.
@@ -434,7 +419,9 @@ class FunctionSpaceData(object):
     def __init__(self, mesh, ufl_element):
         finat_element = create_element(ufl_element)
         real_tensorproduct = eutils.is_real_tensor_product_element(finat_element)
-        entity_dofs = preprocess_finat_element(finat_element)
+        if isinstance(finat_element, finat.EnrichedElement) and finat_element.is_mixed:
+            raise ValueError("Can't create FunctionSpace for MixedElement")
+        entity_dofs = finat_element.entity_dofs()
         nodes_per_entity = tuple(mesh.make_dofs_per_plex_entity(entity_dofs))
         try:
             entity_permutations = finat_element.entity_permutations

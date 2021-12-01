@@ -19,8 +19,7 @@ from firedrake import (assemble_expressions, extrusion_utils as eutils, matrix, 
                        tsfc_interface, utils)
 from firedrake.adjoint import annotate_assemble
 from firedrake.bcs import DirichletBC, EquationBC, EquationBCSplit
-from firedrake.functionspacedata import (preprocess_finat_element, entity_dofs_key,
-                                         entity_permutations_key)
+from firedrake.functionspacedata import entity_dofs_key, entity_permutations_key
 from firedrake.petsc import PETSc
 from firedrake.slate import slac, slate
 from firedrake.slate.slac.kernel_builder import CellFacetKernelArg, LayerCountKernelArg, LayerKernelArg
@@ -810,13 +809,13 @@ def _(_, self, integral_type):
         return _make_dat_wrapper_kernel_arg(elem, integral_type, self.extruded)
 
 def _make_dat_wrapper_kernel_arg(finat_element, integral_type, extruded=False):
-    map_id = _get_map_id(finat_element, integral_type)
+    map_id = _get_map_id(finat_element)
 
     scalar_element = _as_scalar_element(finat_element)
     real_tensorproduct = eutils.is_real_tensor_product_element(scalar_element)
     if isinstance(scalar_element, finat.TensorFiniteElement):
         scalar_element = scalar_element.base_element
-    entity_dofs = preprocess_finat_element(scalar_element)
+    entity_dofs = scalar_element.entity_dofs()
     # offset only valid for extruded
     if extruded:
         offset = tuple(eutils.calc_offset(scalar_element.cell, entity_dofs, scalar_element.space_dimension(), real_tensorproduct))
@@ -899,7 +898,7 @@ def _(_, self, integral_type):
     ufl_element = FiniteElement("DG", cell=self._expr.ufl_domain().ufl_cell(), degree=0)
     finat_element = create_element(ufl_element)
     scalar_element = _as_scalar_element(finat_element)
-    map_id = _get_map_id(scalar_element, integral_type)
+    map_id = _get_map_id(scalar_element)
 
     handler = _ElementHandler(finat_element)
     dim = handler.tensor_shape
@@ -960,14 +959,14 @@ def _(_, self, integral_type):
 
 
 def _make_mat_wrapper_kernel_arg(relem, celem, integral_type, extruded=False):
-    rmap_id = _get_map_id(relem._elem, integral_type)
-    cmap_id = _get_map_id(celem._elem, integral_type)
+    rmap_id = _get_map_id(relem._elem)
+    cmap_id = _get_map_id(celem._elem)
 
     ###
 
     finat_element = _as_scalar_element(relem._elem)
     real_tensorproduct = eutils.is_real_tensor_product_element(finat_element)
-    entity_dofs = preprocess_finat_element(finat_element)
+    entity_dofs = finat_element.entity_dofs()
     if extruded:
         roffset = tuple(eutils.calc_offset(finat_element.cell, entity_dofs, finat_element.space_dimension(), real_tensorproduct))
         # For interior facet integrals we double the size of the offset array
@@ -980,7 +979,7 @@ def _make_mat_wrapper_kernel_arg(relem, celem, integral_type, extruded=False):
 
     finat_element = _as_scalar_element(celem._elem)
     real_tensorproduct = eutils.is_real_tensor_product_element(finat_element)
-    entity_dofs = preprocess_finat_element(finat_element)
+    entity_dofs = finat_element.entity_dofs()
     if extruded:
         coffset = tuple(eutils.calc_offset(finat_element.cell, entity_dofs, finat_element.space_dimension(), real_tensorproduct))
         # For interior facet integrals we double the size of the offset array
@@ -1029,7 +1028,7 @@ class FormExplorer:
         return self._form.ufl_domains()[kinfo.domain_number]
 
 
-def _get_map_id(finat_element, integral_type):
+def _get_map_id(finat_element):
     """Return a key that is used to check if we reuse maps.
 
     functionspacedata.py does the same thing.
@@ -1041,7 +1040,7 @@ def _get_map_id(finat_element, integral_type):
 
     real_tensorproduct = eutils.is_real_tensor_product_element(finat_element)
 
-    entity_dofs = preprocess_finat_element(finat_element)
+    entity_dofs = finat_element.entity_dofs()
     try:
         eperm_key = entity_permutations_key(finat_element.entity_permutations)
     except NotImplementedError:
