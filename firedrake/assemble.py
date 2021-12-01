@@ -243,7 +243,8 @@ def create_assembly_callable(expr, tensor=None, bcs=None, form_compiler_paramete
 
 class _FormAssembler(abc.ABC):
 
-    def __init__(self, *, form_compiler_parameters=None):
+    def __init__(self, form, *, form_compiler_parameters=None):
+        self._form = form
         self._form_compiler_params = form_compiler_parameters
 
     @property
@@ -258,16 +259,46 @@ class _FormAssembler(abc.ABC):
     def assemble(self, *args):
         ...
 
+    @abc.abstractproperty
+    def diagonal(self):
+        ...
+
+    def compile_form(self):
+        try:
+            topology, = set(d.topology for d in self._form.ufl_domains())
+        except ValueError:
+            raise NotImplementedError("All integration domains must share a mesh topology")
+
+        for o in itertools.chain(self._form.arguments(), self._form.coefficients()):
+            domain = o.ufl_domain()
+            if domain is not None and domain.topology != topology:
+                raise NotImplementedError("Assembly with multiple meshes is not supported")
+
+        if isinstance(self._form, ufl.Form):
+            return tsfc_interface.compile_form(
+                self._form, "form",
+                diagonal=self.diagonal,
+                parameters=self._form_compiler_params
+            )
+        elif isinstance(self._form, slate.TensorBase):
+            return slac.compile_expression(
+                self._form, compiler_parameters=self._form_compiler_params
+            )
+        else:
+            raise AssertionError
+
 
 class _ZeroFormAssembler(_FormAssembler):
 
-    def __init__(self, expr, **kwargs):
-        super().__init__(**kwargs)
+    diagonal = False
+    """Diagonal assembly not possible for zero forms."""
 
-        if len(expr.arguments()) != 0:
+    def __init__(self, form, **kwargs):
+        super().__init__(form, **kwargs)
+
+        if len(form.arguments()) != 0:
             raise ValueError("Cannot assemble a 0-form with arguments")
 
-        self._expr = expr
         self._tensor = op2.Global(1, [0.0], dtype=utils.ScalarType)
 
     @property
@@ -275,16 +306,14 @@ class _ZeroFormAssembler(_FormAssembler):
         return self._tensor.data[0]
 
     def assemble(self):
-        knls = _make_wrapper_kernels(
-            self._expr, form_compiler_params=self.form_compiler_params
-        )
-
-        tsfc_knls = [knl.tsfc_kernel for knl in knls]
+        tsfc_knls = self.compile_form()
         all_integer_subdomain_ids = _get_all_integer_subdomain_ids(tsfc_knls)
 
-        for knl in knls:
-            iterset = _get_iterset(self._expr, knl.tsfc_kernel.kinfo, all_integer_subdomain_ids)
-            _execute_parloop(self._expr, knl, iterset, tensor=self._tensor)
+        knls = [_make_wrapper_kernel( self._form, k, all_integer_subdomain_ids) for k in tsfc_knls]
+
+        for tknl, knl in zip(tsfc_knls, knls):
+            iterset = _get_iterset(self._form, tknl.kinfo, all_integer_subdomain_ids)
+            _execute_parloop(self._form, tknl, knl, iterset, tensor=self._tensor)
 
 
 class _OneFormAssembler(_FormAssembler):
@@ -299,7 +328,7 @@ class _OneFormAssembler(_FormAssembler):
         diagonal=False,
         **kwargs
     ):
-        super().__init__(**kwargs)
+        super().__init__(form, **kwargs)
 
         if diagonal:
             test, trial = form.arguments()
@@ -316,11 +345,14 @@ class _OneFormAssembler(_FormAssembler):
         else:
             tensor = firedrake.Function(test.function_space())
 
-        self._form = form
         self._bcs = bcs
         self._tensor = tensor
         self._assembly_type = assembly_type
         self._diagonal = diagonal
+
+    @property
+    def diagonal(self):
+        return self._diagonal
 
     @property
     def result(self):
@@ -333,15 +365,15 @@ class _OneFormAssembler(_FormAssembler):
             form = self._form
             bcs = self._bcs
 
-        knls = _make_wrapper_kernels(form, diagonal=self._diagonal,
-                                     form_compiler_params=self.form_compiler_params)
-
-        tsfc_knls = [knl.tsfc_kernel for knl in knls]
+        tsfc_knls = self.compile_form()
         all_integer_subdomain_ids = _get_all_integer_subdomain_ids(tsfc_knls)
 
-        for knl in knls:
-            iterset = _get_iterset(form, knl.tsfc_kernel.kinfo, all_integer_subdomain_ids)
-            _execute_parloop(form, knl, iterset, tensor=self._tensor, diagonal=self._diagonal)
+        knls = [_make_wrapper_kernel(form, tsfc_knl, all_integer_subdomain_ids, diagonal=self._diagonal)
+                for tsfc_knl in tsfc_knls]
+
+        for tknl, knl in zip(tsfc_knls, knls):
+            iterset = _get_iterset(form, tknl.kinfo, all_integer_subdomain_ids)
+            _execute_parloop(form, tknl, knl, iterset, tensor=self._tensor, diagonal=self._diagonal)
 
         for bc in bcs:
             if isinstance(bc, EquationBC):
@@ -374,9 +406,12 @@ class _OneFormAssembler(_FormAssembler):
 
 class _TwoFormAssembler(_FormAssembler):
 
+    diagonal = False
+    """Diagonal assembly not possible for two forms."""
+
     def __init__(
         self,
-        expr,
+        form,
         tensor=None,
         bcs=None,
         *,
@@ -386,23 +421,22 @@ class _TwoFormAssembler(_FormAssembler):
         form_compiler_parameters=None,
         options_prefix=None,
     ):
-        super().__init__(form_compiler_parameters=form_compiler_parameters)
+        super().__init__(form, form_compiler_parameters=form_compiler_parameters)
 
-        mat_type, sub_mat_type = self._get_mat_type(mat_type, sub_mat_type, expr.arguments())
+        mat_type, sub_mat_type = self._get_mat_type(mat_type, sub_mat_type, form.arguments())
 
         if tensor:
             if mat_type != "matfree":
                 tensor.M.zero()
-            if tensor.a.arguments() != expr.arguments():
+            if tensor.a.arguments() != form.arguments():
                 raise ValueError("Form's arguments do not match provided result tensor")
         else:
             tensor = allocate_matrix(
-                expr, bcs, mat_type=mat_type, sub_mat_type=sub_mat_type, appctx=appctx,
+                form, bcs, mat_type=mat_type, sub_mat_type=sub_mat_type, appctx=appctx,
                 form_compiler_parameters=form_compiler_parameters,
                 options_prefix=options_prefix
             )
 
-        self._expr = expr
         self._tensor = tensor
         self._bcs = bcs
         self._is_matfree = mat_type == "matfree"
@@ -421,16 +455,17 @@ class _TwoFormAssembler(_FormAssembler):
 
         if expr is None:
             assert bcs is None
-            expr = self._expr
+            expr = self._form
             bcs = self._bcs
 
-        knls = _make_wrapper_kernels(expr, form_compiler_params=self.form_compiler_params)
-
-        tsfc_knls = [knl.tsfc_kernel for knl in knls]
+        tsfc_knls = self.compile_form()
         all_integer_subdomain_ids = _get_all_integer_subdomain_ids(tsfc_knls)
 
-        for knl in knls:
-            indices, kinfo = knl.tsfc_kernel
+        knls = [_make_wrapper_kernel(expr, k, all_integer_subdomain_ids)
+                for k in tsfc_knls]
+
+        for tknl, knl in zip(tsfc_knls, knls):
+            indices, kinfo = tknl
 
             iterset = _get_iterset(expr, kinfo, all_integer_subdomain_ids)
 
@@ -449,7 +484,7 @@ class _TwoFormAssembler(_FormAssembler):
             # If we need to handle boundary conditions then replace the first argument to
             # the wrapper kernel.
             if unroll:
-                old_arg = knl.pyop2_kernel.arguments[0]
+                old_arg = knl.arguments[0]
                 if isinstance(old_arg, op2.MatWrapperKernelArg):
                     new_arg = dataclasses.replace(old_arg, unroll=True)
                 elif isinstance(old_arg, op2.MixedMatWrapperKernelArg):
@@ -458,10 +493,9 @@ class _TwoFormAssembler(_FormAssembler):
                     new_arg = dataclasses.replace(old_arg, arguments=new_arguments)
                 else:
                     raise AssertionError
-                pyop2_kernel = pyop2.wrapper_kernel.replace_argument(knl.pyop2_kernel, old_arg, new_arg)
-                knl = dataclasses.replace(knl, pyop2_kernel=pyop2_kernel)
+                knl = pyop2.wrapper_kernel.replace_argument(knl, old_arg, new_arg)
 
-            _execute_parloop(expr, knl, iterset, tensor=self._tensor, lgmaps=lgmaps)
+            _execute_parloop(expr, tknl, knl, iterset, tensor=self._tensor, lgmaps=lgmaps)
 
         for bc in bcs:
             self._apply_bc(bc)
@@ -601,24 +635,9 @@ def _assemble_form(form, tensor=None, bcs=None, *, assembly_type=AssemblyType.SO
     return assembler.result
 
 
-@dataclass(frozen=True)
-class _WrapperKernel:
-
-    pyop2_kernel: op2.WrapperKernel
-    local_kernel: tsfc_interface.SplitKernel
-
-    @property
-    def tsfc_args(self):
-        return self.tsfc_kernel.kinfo.tsfc_kernel_args
-
-    @property
-    def tsfc_kernel(self):
-        return self.local_kernel
-
-
 class _AssembleWrapperKernelBuilder:
 
-    def __init__(self, expr, *, diagonal=False, form_compiler_params=None):
+    def __init__(self, expr, split_knl, all_integer_subdomain_ids, *, diagonal=False):
         """TODO
 
         .. note::
@@ -626,90 +645,75 @@ class _AssembleWrapperKernelBuilder:
             expr should work even if it is 'pure UFL'.
         """
         self._expr = expr
+        self._indices, self._kinfo = split_knl
         self._diagonal = diagonal
-        self._form_compiler_params = form_compiler_params or {}
+        self.all_integer_subdomain_ids = all_integer_subdomain_ids
 
     def build(self):
-        try:
-            topology, = set(d.topology for d in self._expr.ufl_domains())
-        except ValueError:
-            raise NotImplementedError("All integration domains must share a mesh topology")
+        # TODO This is a hack. Make this class take kinfo as a constructor arg
+        domain = FormExplorer(self._expr).get_domain(self._kinfo)
+        extruded = domain.extruded
+        constant_layers = extruded and not domain.variable_layers
 
-        for o in itertools.chain(self._expr.arguments(), self._expr.coefficients()):
-            domain = o.ufl_domain()
-            if domain is not None and domain.topology != topology:
-                raise NotImplementedError("Assembly with multiple meshes is not supported")
+        subset = self.subset()
 
-        if isinstance(self._expr, ufl.Form):
-            local_knls = tsfc_interface.compile_form(
-                self._expr, "form",
-                diagonal=self._diagonal,
-                parameters=self._form_compiler_params
-            )
-        elif isinstance(self._expr, slate.TensorBase):
-            local_knls = slac.compile_expression(
-                self._expr, compiler_parameters=self._form_compiler_params
-            )
+        self.extruded = extruded
+
+        # Icky generator so we can access the correct coefficients in order
+        def coeffs():
+            for n, split_map in self._kinfo.coefficient_map:
+                c = self._expr.coefficients()[n]
+                split_c = c.split()
+                for c_ in (split_c[i] for i in split_map):
+                    yield c_
+        self.coeffs_iterator = iter(coeffs())
+
+        self.integral_type = self._kinfo.integral_type
+
+        wrapper_kernel_args = [
+            self._as_wrapper_kernel_arg(arg)
+            for arg in self._kinfo.tsfc_kernel_args
+            if arg.intent is not None
+        ]
+
+        iteration_region = {
+            "exterior_facet_top": op2.ON_TOP,
+            "exterior_facet_bottom": op2.ON_BOTTOM,
+            "interior_facet_horiz": op2.ON_INTERIOR_FACETS
+        }.get(self._kinfo.integral_type, None)
+
+        return op2.WrapperKernel(
+            self._kinfo.kernel,
+            wrapper_kernel_args,
+            iteration_region=iteration_region,
+            pass_layer_arg=self._kinfo.pass_layer_arg,
+            extruded=extruded,
+            constant_layers=constant_layers,
+            subset=subset
+        )
+
+    def subset(self):
+        domain = FormExplorer(self._expr).get_domain(self._kinfo)
+
+        # Assume that if subdomain_data is not None then we are dealing with
+        # a subset. This is potentially a bit dodgy.
+        subdomain_data = self._expr.subdomain_data()[domain].get(self._kinfo.integral_type, None)
+        if subdomain_data is not None:
+            return True
+
+        if self._kinfo.integral_type in {"exterior_facet_bottom",
+                                   "exterior_facet_top",
+                                   "interior_facet_horiz"}:
+            return True
+
+        if self._kinfo.subdomain_id == "everywhere":
+            return False
+        if self._kinfo.subdomain_id == "otherwise":
+            if self.all_integer_subdomain_ids is None:
+                return False
+            return True
         else:
-            raise AssertionError
-
-        all_integer_subdomain_ids = _get_all_integer_subdomain_ids(local_knls)
-        wrapper_knls = []
-        for local_knl in local_knls:
-            kinfo = local_knl.kinfo
-
-            # TODO This is a hack. Make this class take kinfo as a constructor arg
-            self.indices = local_knl.indices
-            self.kinfo = kinfo
-
-            iterset = _get_iterset(self._expr, kinfo, all_integer_subdomain_ids)
-
-            domain = FormExplorer(self._expr).get_domain(self.kinfo)
-            extruded = domain.extruded
-            constant_layers = extruded and not domain.variable_layers
-
-            self.extruded = extruded
-
-            # TODO This information should be available from UFL
-            subset = isinstance(iterset, op2.Subset)
-
-            # Icky generator so we can access the correct coefficients in order
-            def coeffs():
-                for n, split_map in kinfo.coefficient_map:
-                    c = self._expr.coefficients()[n]
-                    split_c = c.split()
-                    for c_ in (split_c[i] for i in split_map):
-                        yield c_
-            self.coeffs_iterator = iter(coeffs())
-
-            self.integral_type = kinfo.integral_type
-
-            wrapper_kernel_args = [
-                self._as_wrapper_kernel_arg(arg)
-                for arg in kinfo.tsfc_kernel_args
-                if arg.intent is not None
-            ]
-
-            iteration_region = {
-                "exterior_facet_top": op2.ON_TOP,
-                "exterior_facet_bottom": op2.ON_BOTTOM,
-                "interior_facet_horiz": op2.ON_INTERIOR_FACETS
-            }.get(kinfo.integral_type, None)
-
-            pyop2_kernel = op2.WrapperKernel(
-                kinfo.kernel,
-                wrapper_kernel_args,
-                iteration_region=iteration_region,
-                pass_layer_arg=kinfo.pass_layer_arg,
-                extruded=extruded,
-                constant_layers=constant_layers,
-                subset=subset
-            )
-
-            wrapper_kernel = _WrapperKernel(pyop2_kernel, local_knl)
-            wrapper_knls.append(wrapper_kernel)
-
-        return wrapper_knls
+            return True
 
     def _as_wrapper_kernel_arg(self, tsfc_arg):
         # TODO Make singledispatchmethod with Python 3.8
@@ -737,7 +741,7 @@ class _AssembleWrapperKernelBuilder:
         return dim, map_arg
 
     def get_function_spaces(self, arguments):
-        indices = self.indices
+        indices = self._indices
         if all(i is None for i in indices):
             return tuple(a.ufl_function_space() for a in arguments)
         elif all(i is not None for i in indices):
@@ -810,7 +814,7 @@ def _as_wrapper_kernel_arg(tsfc_arg, self):
 
 @_as_wrapper_kernel_arg.register(kernel_args.CoordinatesKernelArg)
 def _as_wrapper_kernel_arg_coordinates(_, self):
-    domain = FormExplorer(self._expr).get_domain(self.kinfo)
+    domain = FormExplorer(self._expr).get_domain(self._kinfo)
     finat_element = create_element(domain.ufl_coordinate_element())
     return self._make_dat_wrapper_kernel_arg(finat_element)
 
@@ -962,7 +966,7 @@ def _get_map_type(integral_type):
         raise AssertionError
 
 
-def _wrapper_kernel_cache_key(form, **kwargs):
+def _wrapper_kernel_cache_key(form, split_knl, all_integer_subdomain_ids, **kwargs):
     if isinstance(form, ufl.Form):
         sig = form.signature()
     elif isinstance(form, slate.TensorBase):
@@ -983,18 +987,18 @@ def _wrapper_kernel_cache_key(form, **kwargs):
 
     return ((sig,)
             + tuple(subdomain_key)
-            + _tuplify(kwargs.pop("form_compiler_params", None) or {})
-            + cachetools.keys.hashkey(**kwargs))
+            + _tuplify(all_integer_subdomain_ids)
+            + cachetools.keys.hashkey(split_knl, **kwargs))
 
 
 @cachetools.cached(cachetools.LRUCache(maxsize=128), key=_wrapper_kernel_cache_key)
-def _make_wrapper_kernels(*args, **kwargs):
+def _make_wrapper_kernel(*args, **kwargs):
     return _AssembleWrapperKernelBuilder(*args, **kwargs).build()
 
 
 class ParloopExecutor:
 
-    def __init__(self, form, knl, iterset, *, tensor=None, diagonal=False, lgmaps=None):
+    def __init__(self, form, split_knl, knl, iterset, *, tensor=None, diagonal=False, lgmaps=None):
         """
 
         .. note::
@@ -1003,6 +1007,8 @@ class ParloopExecutor:
             attached. This means that we cannot safely cache the resulting object.
         """
         self._form = form
+        self._split_knl = split_knl
+        self._kinfo = split_knl.kinfo
         self._knl = knl
         self._iterset = iterset
         self._tensor = tensor
@@ -1010,7 +1016,7 @@ class ParloopExecutor:
         self._lgmaps = lgmaps
 
     def run(self):
-        kinfo = self._knl.tsfc_kernel.kinfo
+        kinfo = self._split_knl.kinfo
 
         # Icky generator so we can access the correct coefficients in order
         def coeffs():
@@ -1022,11 +1028,11 @@ class ParloopExecutor:
         self.coeffs_iterator = iter(coeffs())
 
         parloop_args = [
-            _as_parloop_arg(tsfc_arg, self, self._knl, lgmaps=self._lgmaps)
-            for tsfc_arg in self._knl.tsfc_args if tsfc_arg.intent is not None
+            _as_parloop_arg(tsfc_arg, self)
+            for tsfc_arg in self._split_knl.kinfo.tsfc_kernel_args if tsfc_arg.intent is not None
         ]
         try:
-            op2.parloop(self._knl.pyop2_kernel, self._iterset, parloop_args)
+            op2.parloop(self._knl, self._iterset, parloop_args)
         except MapValueError:
             raise RuntimeError("Integral measure does not match measure of all "
                                "coefficients/arguments")
@@ -1055,7 +1061,7 @@ class ParloopExecutor:
 
 # TODO Make into a singledispatchmethod when we have Python 3.8
 @functools.singledispatch
-def _as_parloop_arg(tsfc_arg, self, wrapper_kernel, **kwargs):
+def _as_parloop_arg(tsfc_arg, self):
     """Return a :class:`op2.ParloopArg` corresponding to the provided
     :class:`tsfc.KernelArg`.
     """
@@ -1063,85 +1069,85 @@ def _as_parloop_arg(tsfc_arg, self, wrapper_kernel, **kwargs):
 
 
 @_as_parloop_arg.register(kernel_args.CoordinatesKernelArg)
-def _as_parloop_arg_coordinates(_, self, wrapper_kernel, **kwargs):
-    kinfo = wrapper_kernel.tsfc_kernel.kinfo
-    mesh = self._get_mesh(wrapper_kernel.tsfc_kernel)
+def _as_parloop_arg_coordinates(_, self):
+    kinfo = self._kinfo
+    mesh = self._get_mesh(self._split_knl)
     func = mesh.coordinates
     map_ = self._get_map(func.function_space(), kinfo.integral_type)
     return op2.DatParloopArg(func.dat, map_)
 
 
 @_as_parloop_arg.register(kernel_args.CellOrientationsKernelArg)
-def _as_parloop_arg_cell_orientations(_, self, wrapper_kernel, **kwargs):
-    kinfo = wrapper_kernel.tsfc_kernel.kinfo
-    mesh = self._get_mesh(wrapper_kernel.tsfc_kernel)
+def _as_parloop_arg_cell_orientations(_, self):
+    kinfo = self._kinfo
+    mesh = self._get_mesh(self._split_knl)
     func = mesh.cell_orientations()
     map_ = self._get_map(func.function_space(), kinfo.integral_type)
     return op2.DatParloopArg(func.dat, map_)
 
 
 @_as_parloop_arg.register(kernel_args.CellSizesKernelArg)
-def _(_, self, wrapper_kernel, **kwargs):
-    kinfo = wrapper_kernel.tsfc_kernel.kinfo
-    mesh = self._get_mesh(wrapper_kernel.tsfc_kernel)
+def _(_, self):
+    kinfo = self._kinfo
+    mesh = self._get_mesh(self._split_knl)
     func = mesh.cell_sizes
     map_ = self._get_map(func.function_space(), kinfo.integral_type)
     return op2.DatParloopArg(func.dat, map_)
 
 
 @_as_parloop_arg.register(kernel_args.ExteriorFacetKernelArg)
-def _(_, self, wrapper_kernel, **kwargs):
-    mesh = self._get_mesh(wrapper_kernel.tsfc_kernel)
+def _(_, self):
+    mesh = self._get_mesh(self._split_knl)
     return op2.DatParloopArg(mesh.exterior_facets.local_facet_dat)
 
 
 @_as_parloop_arg.register(kernel_args.InteriorFacetKernelArg)
-def _(_, self, wrapper_kernel, **kwargs):
-    mesh = self._get_mesh(wrapper_kernel.tsfc_kernel)
+def _(_, self):
+    mesh = self._get_mesh(self._split_knl)
     return op2.DatParloopArg(mesh.interior_facets.local_facet_dat)
 
 
 @_as_parloop_arg.register(CellFacetKernelArg)
-def _(_, self, wrapper_kernel, **kwargs):
-    mesh = self._get_mesh(wrapper_kernel.tsfc_kernel)
+def _(_, self):
+    mesh = self._get_mesh(self._split_knl)
     return op2.DatParloopArg(mesh.cell_to_facets)
 
 
 @_as_parloop_arg.register(kernel_args.ConstantKernelArg)
-def _(_, self, wrapper_kernel, **kwargs):
+def _(_, self):
     coeff = next(self.coeffs_iterator)
     return op2.GlobalParloopArg(coeff.dat)
 
 
 @_as_parloop_arg.register(kernel_args.CoefficientKernelArg)
-def _(_, self, wrapper_kernel, **kwargs):
-    kinfo = wrapper_kernel.tsfc_kernel.kinfo
+def _(_, self):
+    kinfo = self._kinfo
 
     coeff = next(self.coeffs_iterator)
     return op2.DatParloopArg(coeff.dat, self._get_map(coeff.function_space(), kinfo.integral_type))
 
 
 @_as_parloop_arg.register(LayerCountKernelArg)
-def _(_, self, wrapper_kernel, **kwargs):
+def _(_, self):
     glob = op2.Global(LayerCountKernelArg.shape, self._iterset.layers-2, dtype=LayerCountKernelArg.dtype)
     return op2.GlobalParloopArg(glob)
 
 
 @_as_parloop_arg.register(kernel_args.ScalarOutputKernelArg)
-def _(_, self, wrapper_kernel, **kwargs):
-    kinfo = wrapper_kernel.tsfc_kernel.kinfo
+def _(_, self):
+    kinfo = self._kinfo
     # For real assembly self._tensor is a Function, for normal assembly it is a Global.
     if isinstance(self._tensor, op2.Global):
         return op2.GlobalParloopArg(self._tensor)
     elif isinstance(self._tensor, firedrake.Function):
-        i, = wrapper_kernel.tsfc_kernel.indices
+        i, = self._split_knl.indices
         if i is None:
             return op2.GlobalParloopArg(self._tensor.dat)
         else:
             return op2.GlobalParloopArg(self._tensor.dat[i])
     elif isinstance(self._tensor, firedrake.matrix.Matrix):
         # Matrices also have to handle global blocks
-        i, j = wrapper_kernel.tsfc_kernel.indices
+        i, j = self._split_knl.indices
         test, trial = self._tensor.a.arguments()
         if i is None and j is None:
             rmap = self._get_map(test.function_space(), kinfo.integral_type)
@@ -1159,13 +1165,13 @@ def _(_, self, wrapper_kernel, **kwargs):
 
 
 @_as_parloop_arg.register(kernel_args.VectorOutputKernelArg)
-def _(_, self, wrapper_kernel, **kwargs):
+def _(_, self):
     tensor = self._tensor
-    kinfo = wrapper_kernel.tsfc_kernel.kinfo
+    kinfo = self._kinfo
 
     # Handle global blocks (from real)
     if isinstance(self._tensor, firedrake.matrix.Matrix):
-        i, j = wrapper_kernel.tsfc_kernel.indices
+        i, j = self._split_knl.indices
         test, trial = tensor.a.arguments()
         if i is None and j is None:
             rmap = self._get_map(test.function_space(), kinfo.integral_type)
@@ -1179,7 +1185,7 @@ def _(_, self, wrapper_kernel, **kwargs):
             map_ = rmap or cmap
             return op2.DatParloopArg(tensor.M[i, j].handle.getPythonContext().dat, map_)
 
-    i, = wrapper_kernel.tsfc_kernel.indices
+    i, = self._split_knl.indices
     if i is None:
         return op2.DatParloopArg(
             self._tensor.dat, self._get_map(self._tensor.function_space(), kinfo.integral_type)
@@ -1192,20 +1198,20 @@ def _(_, self, wrapper_kernel, **kwargs):
 
 
 @_as_parloop_arg.register(kernel_args.MatrixOutputKernelArg)
-def _(_, self, wrapper_kernel, *, lgmaps):
+def _(_, self):
     tensor = self._tensor
-    kinfo = wrapper_kernel.tsfc_kernel.kinfo
-    i, j = wrapper_kernel.tsfc_kernel.indices
+    kinfo = self._kinfo
+    i, j = self._split_knl.indices
     test, trial = tensor.a.arguments()
     if i is None and j is None:
         rmap = self._get_map(test.function_space(), kinfo.integral_type)
         cmap = self._get_map(trial.function_space(), kinfo.integral_type)
-        return op2.MatParloopArg(tensor.M, (rmap, cmap), lgmaps=tuple(lgmaps))
+        return op2.MatParloopArg(tensor.M, (rmap, cmap), lgmaps=tuple(self._lgmaps))
     else:
         assert i is not None and j is not None
         rmap = self._get_map(test.function_space()[i], kinfo.integral_type)
         cmap = self._get_map(trial.function_space()[j], kinfo.integral_type)
-        return op2.MatParloopArg(tensor.M[i, j], (rmap, cmap), lgmaps=(lgmaps,))
+        return op2.MatParloopArg(tensor.M[i, j], (rmap, cmap), lgmaps=(self._lgmaps,))
 
 
 def _execute_parloop(*args, **kwargs):
@@ -1244,4 +1250,4 @@ def _get_all_integer_subdomain_ids(knls):
 
     for k, v in all_integer_subdomain_ids.items():
         all_integer_subdomain_ids[k] = tuple(sorted(v))
-    return all_integer_subdomain_ids
+    return all_integer_subdomain_ids or None

@@ -191,7 +191,7 @@ def make_tsfc_kernel(form, name, parameters, number_map, interface, coffee=False
                                       needs_cell_facets=False,
                                       pass_layer_arg=False,
                                       needs_cell_sizes=kernel.needs_cell_sizes,
-                                      tsfc_kernel_args=kernel.arguments))
+                                      tsfc_kernel_args=tuple(kernel.arguments)))
         res = TSFCKernel(kernels)
 
         if comm.rank == 0:
