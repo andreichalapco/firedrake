@@ -666,11 +666,11 @@ class _AssembleWrapperKernelBuilder:
 
             domain = FormExplorer(self._expr).get_domain(self.kinfo)
             extruded = domain.extruded
+            constant_layers = extruded and not domain.variable_layers
 
             self.extruded = extruded
 
             # TODO This information should be available from UFL
-            constant_layers = extruded and iterset.constant_layers
             subset = isinstance(iterset, op2.Subset)
 
             # Icky generator so we can access the correct coefficients in order
@@ -682,9 +682,10 @@ class _AssembleWrapperKernelBuilder:
                         yield c_
             self.coeffs_iterator = iter(coeffs())
 
+            self.integral_type = kinfo.integral_type
 
             wrapper_kernel_args = [
-                self._as_wrapper_kernel_arg(arg, kinfo.integral_type)
+                self._as_wrapper_kernel_arg(arg)
                 for arg in kinfo.tsfc_kernel_args
                 if arg.intent is not None
             ]
@@ -710,25 +711,112 @@ class _AssembleWrapperKernelBuilder:
 
         return wrapper_knls
 
-    def _as_wrapper_kernel_arg(self, tsfc_arg, integral_type):
+    def _as_wrapper_kernel_arg(self, tsfc_arg):
         # TODO Make singledispatchmethod with Python 3.8
-        return _as_wrapper_kernel_arg(tsfc_arg, self, integral_type)
+        return _as_wrapper_kernel_arg(tsfc_arg, self)
+
+    def get_dim_and_map(self, finat_element):
+        map_id = self._get_map_id(finat_element)
+
+        # offset only valid for extruded
+        if self.extruded:
+            offset = tuple(eutils.calculate_dof_offset(finat_element))
+            # For interior facet integrals we double the size of the offset array
+            if self.integral_type in {"interior_facet", "interior_facet_vert"}:
+                offset += offset
+        else:
+            offset = None
+
+        handler = _ElementHandler(finat_element)
+        dim = handler.tensor_shape
+        arity = handler.node_shape
+        if self.integral_type in {"interior_facet", "interior_facet_vert"}:
+            arity *= 2
+
+        map_arg = op2.MapWrapperKernelArg(map_id, arity, offset)
+        return dim, map_arg
+
+    def get_function_spaces(self, arguments):
+        indices = self.indices
+        if all(i is None for i in indices):
+            return tuple(a.ufl_function_space() for a in arguments)
+        elif all(i is not None for i in indices):
+            return tuple(a.ufl_function_space()[i] for i, a in zip(indices, arguments))
+        else:
+            raise AssertionError
+
+    def make_arg(self, elements):
+        if len(elements) == 1:
+            func = self._make_dat_wrapper_kernel_arg
+        elif len(elements) == 2:
+            func = self._make_mat_wrapper_kernel_arg
+        else:
+            raise AssertionError
+        return func(*[e._elem for e in elements])
+
+    def make_mixed_arg(self, elements):
+        subargs = []
+        for splitstuff in itertools.product(*[e.split() for e in elements]):
+            subargs.append(self.make_arg(splitstuff))
+
+        if len(elements) == 1:
+            return op2.MixedDatWrapperKernelArg(tuple(subargs))
+        elif len(elements) == 2:
+            e1, e2 = elements
+            shape = len(e1.split()), len(e2.split())
+            return op2.MixedMatWrapperKernelArg(tuple(subargs), shape)
+        else:
+            raise AssertionError
+
+    def _make_dat_wrapper_kernel_arg(self, finat_element):
+        dim, map_arg = self.get_dim_and_map(finat_element)
+        return op2.DatWrapperKernelArg(dim, map_arg)
+
+    def _make_mat_wrapper_kernel_arg(self, relem, celem):
+        rdim, rmap_arg = self.get_dim_and_map(relem)
+        cdim, cmap_arg = self.get_dim_and_map(celem)
+
+        # PyOP2 matrix objects have scalar dims so we cope with that here...
+        rdim = (numpy.prod(rdim, dtype=int),)
+        cdim = (numpy.prod(cdim, dtype=int),)
+
+        return op2.MatWrapperKernelArg(((rdim+cdim,),), (rmap_arg, cmap_arg))
+
+    @staticmethod
+    def _get_map_id(finat_element):
+        """Return a key that is used to check if we reuse maps.
+
+        functionspacedata.py does the same thing.
+        """
+        # TODO need to look at measure...
+        # functionspacedata does some magic and replaces tensorelements with base
+        if isinstance(finat_element, finat.TensorFiniteElement):
+            finat_element = finat_element.base_element
+
+        real_tensorproduct = eutils.is_real_tensor_product_element(finat_element)
+
+        entity_dofs = finat_element.entity_dofs()
+        try:
+            eperm_key = entity_permutations_key(finat_element.entity_permutations)
+        except NotImplementedError:
+            eperm_key = None
+        return entity_dofs_key(entity_dofs), real_tensorproduct, eperm_key
 
 
 @functools.singledispatch
-def _as_wrapper_kernel_arg(tsfc_arg, self, integral_type):
+def _as_wrapper_kernel_arg(tsfc_arg, self):
     raise NotImplementedError
 
 
 @_as_wrapper_kernel_arg.register(kernel_args.CoordinatesKernelArg)
-def _(_, self, integral_type):
+def _as_wrapper_kernel_arg_coordinates(_, self):
     domain = FormExplorer(self._expr).get_domain(self.kinfo)
     finat_element = create_element(domain.ufl_coordinate_element())
-    extruded = domain.extruded
-    return _make_dat_wrapper_kernel_arg(finat_element, integral_type, extruded)
+    return self._make_dat_wrapper_kernel_arg(finat_element)
+
 
 @_as_wrapper_kernel_arg.register(kernel_args.ConstantKernelArg)
-def _(_, self, integral_type):
+def _as_wrapper_kernel_arg_constant(_, self):
     coeff = next(self.coeffs_iterator)
     ufl_element = coeff.ufl_function_space().ufl_element()
     assert ufl_element.family() == "Real"
@@ -736,104 +824,84 @@ def _(_, self, integral_type):
 
 
 @_as_wrapper_kernel_arg.register(kernel_args.CoefficientKernelArg)
-def _(_, self, integral_type):
-    domain = FormExplorer(self._expr).get_domain(self.kinfo)
-    extruded = domain.extruded
+def _as_wrapper_kernel_arg_coefficient(_, self):
     coeff = next(self.coeffs_iterator)
     finat_element = create_element(coeff.ufl_function_space().ufl_element())
-    return _make_dat_wrapper_kernel_arg(finat_element, integral_type, extruded)
+    return self._make_dat_wrapper_kernel_arg(finat_element)
 
 
 @_as_wrapper_kernel_arg.register(kernel_args.CellSizesKernelArg)
-def _as_wrapper_kernel_arg_cell_sizes(_, self, integral_type):
+def _as_wrapper_kernel_arg_cell_sizes(_, self):
     domain = FormExplorer(self._expr).get_domain(self.kinfo)
     # See set_cell_sizes from tsfc.kernel_interface.firedrake_loopy
     ufl_element = ufl.FiniteElement("P", domain.ufl_cell(), 1)
     finat_element = create_element(ufl_element)
-    return _make_dat_wrapper_kernel_arg(finat_element, integral_type, domain.extruded)
+    return self._make_dat_wrapper_kernel_arg(finat_element)
 
 
-@_as_wrapper_kernel_arg.register(kernel_args.ScalarOutputKernelArg)
-def _(_, self, integral_type):
-    return op2.GlobalWrapperKernelArg((1,))
+@_as_wrapper_kernel_arg.register(kernel_args.OutputKernelArg)
+def _as_wrapper_kernel_arg_output(_, self):
+    arguments = self._expr.arguments()
 
-
-@_as_wrapper_kernel_arg.register(kernel_args.VectorOutputKernelArg)
-def _(_, self, integral_type):
-    # Handle global blocks (from real)
-    if len(self._expr.arguments()) == 2 and not self._diagonal:
-        i, j = self.indices
-        test, trial = self._expr.arguments()
-        if i is None and j is None:
-            Vr = test.ufl_function_space()
-            Vc = trial.ufl_function_space()
-        else:
-            assert i is not None and j is not None
-            Vr = test.ufl_function_space()[i]
-            Vc = trial.ufl_function_space()[j]
-
-        rfam = Vr.ufl_element().family()
-        cfam = Vc.ufl_element().family()
-        if rfam == "Real" and cfam != "Real":
-            finat_element = create_element(Vc.ufl_element())
-        elif rfam != "Real" and cfam == "Real":
-            finat_element = create_element(Vr.ufl_element())
-        else:
-            raise AssertionError
-
-        domain = FormExplorer(self._expr).get_domain(self.kinfo)
-        extruded = domain.extruded
-
-        return _make_dat_wrapper_kernel_arg(finat_element, integral_type, extruded)
-
-    ###
-
-    i, = self.indices
+    # lower this
+    if len(arguments) == 0:
+        return op2.GlobalWrapperKernelArg((1,))
 
     if self._diagonal:
-        test, _ = self._expr.arguments()
+        test, trial = arguments
+        arguments = test,
+
+    function_spaces = self.get_function_spaces(arguments)
+    # need to drop real elements here since they correspond to global blocks
+    # (and the data structure loses a rank)
+    elems = [_ElementHandler(create_element(V.ufl_element()))
+             for V in function_spaces
+             if V.ufl_element().family() != "Real"]
+
+    if len(elems) == 0:
+        return op2.GlobalWrapperKernelArg((1,))
+
+    if any(e.is_mixed for e in elems):
+        return self.make_mixed_arg(elems)
     else:
-        test, = self._expr.arguments()
+        return self.make_arg(elems)
 
-    V = test.ufl_function_space()
-    if i is not None:
-        V = V[i]
-    elem = create_element(V.ufl_element())
-    handler = _ElementHandler(elem)
-    if handler.is_mixed:
-        subargs = []
-        for el in handler.split():
-            subargs.append(_make_dat_wrapper_kernel_arg(el._elem, integral_type, self.extruded))
-        return op2.MixedDatWrapperKernelArg(tuple(subargs))
+
+@_as_wrapper_kernel_arg.register(kernel_args.ExteriorFacetKernelArg)
+def _(_, self):
+    return op2.DatWrapperKernelArg((1,))
+
+
+@_as_wrapper_kernel_arg.register(kernel_args.InteriorFacetKernelArg)
+def _(_, self):
+    return op2.DatWrapperKernelArg((2,))
+
+
+@_as_wrapper_kernel_arg.register(CellFacetKernelArg)
+def _(_, self):
+    # TODO Share this functionality with Slate kernel_builder.py
+    domain = FormExplorer(self._expr).get_domain(self.kinfo)
+    if domain.extruded:
+        # TODO This is not sufficiently stripped
+        num_facets = domain._base_mesh.ufl_cell().num_facets()
     else:
-        return _make_dat_wrapper_kernel_arg(elem, integral_type, self.extruded)
+        num_facets = domain.ufl_cell().num_facets()
+    return op2.DatWrapperKernelArg((num_facets, 2))
 
-def _make_dat_wrapper_kernel_arg(finat_element, integral_type, extruded=False):
-    map_id = _get_map_id(finat_element)
 
-    scalar_element = _as_scalar_element(finat_element)
-    real_tensorproduct = eutils.is_real_tensor_product_element(scalar_element)
-    if isinstance(scalar_element, finat.TensorFiniteElement):
-        scalar_element = scalar_element.base_element
-    entity_dofs = scalar_element.entity_dofs()
-    # offset only valid for extruded
-    if extruded:
-        offset = tuple(eutils.calculate_dof_offset(scalar_element))
-        # For interior facet integrals we double the size of the offset array
-        if integral_type in {"interior_facet", "interior_facet_vert"}:
-            offset += offset
+@_as_wrapper_kernel_arg.register(kernel_args.CellOrientationsKernelArg)
+def _(_, self):
+    # this is taken largely from mesh.py where we observe that the function space is
+    # DG0.
+    ufl_element = ufl.FiniteElement("DG", cell=self._expr.ufl_domain().ufl_cell(), degree=0)
+    finat_element = create_element(ufl_element)
+    return self._make_dat_wrapper_kernel_arg(finat_element)
 
-    else:
-        offset = None
 
-    handler = _ElementHandler(finat_element)
-    dim = handler.tensor_shape
-    arity = handler.node_shape
-    if integral_type in {"interior_facet", "interior_facet_vert"}:
-        arity *= 2
+@_as_wrapper_kernel_arg.register(LayerCountKernelArg)
+def _as_wrapper_kernel_arg_layer_count(_, self):
+    return op2.GlobalWrapperKernelArg((1,))
 
-    map_arg = op2.MapWrapperKernelArg(map_id, arity, offset)
-    return op2.DatWrapperKernelArg(dim, map_arg)
 
 class _ElementHandler:
 
@@ -868,156 +936,6 @@ class _ElementHandler:
     def _is_tensor_element(self):
         return isinstance(self._elem, finat.TensorFiniteElement)
 
-@_as_wrapper_kernel_arg.register(kernel_args.ExteriorFacetKernelArg)
-def _(_, self, integral_type):
-    return op2.DatWrapperKernelArg((1,))
-
-
-@_as_wrapper_kernel_arg.register(kernel_args.InteriorFacetKernelArg)
-def _(_, self, integral_type):
-    return op2.DatWrapperKernelArg((2,))
-
-
-@_as_wrapper_kernel_arg.register(CellFacetKernelArg)
-def _(_, self, integral_type):
-    # TODO Share this functionality with Slate kernel_builder.py
-    domain = FormExplorer(self._expr).get_domain(self.kinfo)
-    if domain.extruded:
-        # TODO This is not sufficiently stripped
-        num_facets = domain._base_mesh.ufl_cell().num_facets()
-    else:
-        num_facets = domain.ufl_cell().num_facets()
-    return op2.DatWrapperKernelArg((num_facets, 2))
-
-
-@_as_wrapper_kernel_arg.register(kernel_args.CellOrientationsKernelArg)
-def _(_, self, integral_type):
-    # this is taken largely from mesh.py where we observe that the function space is
-    # DG0.
-    from ufl import FiniteElement
-    ufl_element = FiniteElement("DG", cell=self._expr.ufl_domain().ufl_cell(), degree=0)
-    finat_element = create_element(ufl_element)
-    scalar_element = _as_scalar_element(finat_element)
-    map_id = _get_map_id(scalar_element)
-
-    handler = _ElementHandler(finat_element)
-    dim = handler.tensor_shape
-    arity = handler.node_shape
-    if integral_type in {"interior_facet", "interior_facet_vert"}:
-        arity *= 2
-    map_arg = op2.MapWrapperKernelArg(map_id, arity)
-    return op2.DatWrapperKernelArg(dim, map_arg)
-
-
-@_as_wrapper_kernel_arg.register(LayerCountKernelArg)
-def _as_wrapper_kernel_arg_layer_count(_, self, integral_type):
-    return op2.GlobalWrapperKernelArg((1,))
-
-
-@_as_wrapper_kernel_arg.register(kernel_args.MatrixOutputKernelArg)
-def _(_, self, integral_type):
-    i, j = self.indices
-    test, trial = self._expr.arguments()
-
-    Vr = test.ufl_function_space()
-    Vc = trial.ufl_function_space()
-
-    if i is not None and j is not None:
-        Vr = Vr[i]
-        Vc = Vc[j]
-    else:
-        assert i is None and j is None
-
-    relem = create_element(Vr.ufl_element())
-    celem = create_element(Vc.ufl_element())
-
-    rhandler= _ElementHandler(relem)
-    chandler= _ElementHandler(celem)
-
-    if rhandler.is_mixed:
-        if chandler.is_mixed:
-            subargs = []
-            shape = len(rhandler.split()), len(chandler.split())
-            for rel, cel in itertools.product(rhandler.split(), chandler.split()):
-                subargs.append(_make_mat_wrapper_kernel_arg(rel, cel, integral_type, self.extruded))
-            return op2.MixedMatWrapperKernelArg(tuple(subargs), shape)
-        else:
-            subargs = []
-            shape = len(rhandler.split()), 1
-            for rel in rhandler.split():
-                subargs.append(_make_mat_wrapper_kernel_arg(rel, chandler, integral_type, self.extruded))
-            return op2.MixedMatWrapperKernelArg(tuple(subargs), shape)
-    else:
-        if chandler.is_mixed:
-            shape = 1, len(chandler.split())
-            subargs = []
-            for cel in chandler.split():
-                subargs.append(_make_mat_wrapper_kernel_arg(rhandler, cel, integral_type, self.extruded))
-            return op2.MixedMatWrapperKernelArg(tuple(subargs), shape)
-        else:
-            return _make_mat_wrapper_kernel_arg(rhandler, chandler, integral_type, self.extruded)
-
-
-def _make_mat_wrapper_kernel_arg(relem, celem, integral_type, extruded=False):
-    rmap_id = _get_map_id(relem._elem)
-    cmap_id = _get_map_id(celem._elem)
-
-    ###
-
-    finat_element = _as_scalar_element(relem._elem)
-    real_tensorproduct = eutils.is_real_tensor_product_element(finat_element)
-    entity_dofs = finat_element.entity_dofs()
-    if extruded:
-        roffset = tuple(eutils.calculate_dof_offset(finat_element))
-        # For interior facet integrals we double the size of the offset array
-        if integral_type in {"interior_facet", "interior_facet_vert"}:
-            roffset *= 2
-    else:
-        roffset = None
-
-    ###
-
-    finat_element = _as_scalar_element(celem._elem)
-    real_tensorproduct = eutils.is_real_tensor_product_element(finat_element)
-    entity_dofs = finat_element.entity_dofs()
-    if extruded:
-        coffset = tuple(eutils.calculate_dof_offset(finat_element))
-        # For interior facet integrals we double the size of the offset array
-        if integral_type in {"interior_facet", "interior_facet_vert"}:
-            coffset *= 2
-
-    else:
-        coffset = None
-
-    ###
-
-    rdim = relem.tensor_shape
-    rarity = relem.node_shape
-    if integral_type in {"interior_facet", "interior_facet_vert"}:
-        rarity *= 2
-    rmap_arg = op2.MapWrapperKernelArg(rmap_id, rarity, roffset)
-
-    ###
-
-    cdim = celem.tensor_shape
-    carity = celem.node_shape
-    if integral_type in {"interior_facet", "interior_facet_vert"}:
-        carity *= 2
-    cmap_arg = op2.MapWrapperKernelArg(cmap_id, carity, coffset)
-
-    ###
-
-    # PyOP2 matrix objects have scalar dims so we cope with that here...
-    rdim = (numpy.prod(rdim, dtype=int),)
-    cdim = (numpy.prod(cdim, dtype=int),)
-
-    return op2.MatWrapperKernelArg(((rdim+cdim,),), (rmap_arg, cmap_arg))
-
-
-def _as_scalar_element(elem):
-    # This is done to mirror what happens in functionspacedata.py
-    return elem.base_element if isinstance(elem, finat.TensorFiniteElement) else elem
-
 
 class FormExplorer:
 
@@ -1026,26 +944,6 @@ class FormExplorer:
 
     def get_domain(self, kinfo):
         return self._form.ufl_domains()[kinfo.domain_number]
-
-
-def _get_map_id(finat_element):
-    """Return a key that is used to check if we reuse maps.
-
-    functionspacedata.py does the same thing.
-    """
-    # TODO need to look at measure...
-    # functionspacedata does some magic and replaces tensorelements with base
-    if isinstance(finat_element, finat.TensorFiniteElement):
-        finat_element = finat_element.base_element
-
-    real_tensorproduct = eutils.is_real_tensor_product_element(finat_element)
-
-    entity_dofs = finat_element.entity_dofs()
-    try:
-        eperm_key = entity_permutations_key(finat_element.entity_permutations)
-    except NotImplementedError:
-        eperm_key = None
-    return entity_dofs_key(entity_dofs), real_tensorproduct, eperm_key
 
 
 def _get_map_type(integral_type):
