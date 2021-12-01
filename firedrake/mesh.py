@@ -1385,6 +1385,7 @@ class MeshGeometryCargo:
     # - _coordinates
     # - _geometric_shared_data_cache
     # - _coordinates_function
+    # - _parent_mesh  (VertexOnly only)
 
 
 class MeshGeometry(ufl.Mesh, MeshGeometryMixin):
@@ -1441,6 +1442,19 @@ class MeshGeometry(ufl.Mesh, MeshGeometryMixin):
     @property
     def _topology(self):
         return self.ufl_cargo().topology
+
+    @_topology.setter
+    def _topology(self, val):
+        self.ufl_cargo().topology = val
+
+    # Fix for vertex-only meshes
+    @property
+    def _parent_mesh(self):
+        return self.ufl_cargo()._parent_mesh
+
+    @_parent_mesh.setter
+    def _parent_mesh(self, val):
+        self.ufl_cargo()._parent_mesh = val
 
     @property
     def _coordinates(self):

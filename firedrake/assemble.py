@@ -761,6 +761,34 @@ def _(_, self, integral_type):
 
 @_as_wrapper_kernel_arg.register(kernel_args.VectorOutputKernelArg)
 def _(_, self, integral_type):
+    # Handle global blocks (from real)
+    if len(self._expr.arguments()) == 2 and not self._diagonal:
+        i, j = self.indices
+        test, trial = self._expr.arguments()
+        if i is None and j is None:
+            Vr = test.ufl_function_space()
+            Vc = trial.ufl_function_space()
+        else:
+            assert i is not None and j is not None
+            Vr = test.ufl_function_space()[i]
+            Vc = trial.ufl_function_space()[j]
+
+        rfam = Vr.ufl_element().family()
+        cfam = Vc.ufl_element().family()
+        if rfam == "Real" and cfam != "Real":
+            finat_element = create_element(Vc.ufl_element())
+        elif rfam != "Real" and cfam == "Real":
+            finat_element = create_element(Vr.ufl_element())
+        else:
+            raise AssertionError
+
+        domain = FormExplorer(self._expr).get_domain(self.kinfo)
+        extruded = domain.extruded
+
+        return _make_dat_wrapper_kernel_arg(finat_element, integral_type, extruded)
+
+    ###
+
     i, = self.indices
 
     if self._diagonal:
