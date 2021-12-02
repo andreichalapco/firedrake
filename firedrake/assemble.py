@@ -987,18 +987,22 @@ class ParloopExecutor:
     def mesh(self):
         return self._form.ufl_domains()[self._kinfo.domain_number]
 
-    @staticmethod
-    def _get_map(func_space, integral_type):
-        """TODO"""
-        assert isinstance(func_space, ufl.FunctionSpace)
+    @property
+    def integral_type(self):
+        return self._kinfo.integral_type
 
-        if integral_type in {"cell", "exterior_facet_top", "exterior_facet_bottom",
-                             "interior_facet_horiz"}:
-            return func_space.cell_node_map()
-        elif integral_type in {"exterior_facet", "exterior_facet_vert"}:
-            return func_space.exterior_facet_node_map()
-        elif integral_type in {"interior_facet", "interior_facet_vert"}:
-            return func_space.interior_facet_node_map()
+    def _get_map(self, V):
+        """TODO"""
+        assert isinstance(V, ufl.FunctionSpace)
+
+        if self.integral_type in {"cell", "exterior_facet_top",
+                                  "exterior_facet_bottom",
+                                  "interior_facet_horiz"}:
+            return V.cell_node_map()
+        elif self.integral_type in {"exterior_facet", "exterior_facet_vert"}:
+            return V.exterior_facet_node_map()
+        elif self.integral_type in {"interior_facet", "interior_facet_vert"}:
+            return V.interior_facet_node_map()
         else:
             raise AssertionError
 
@@ -1019,7 +1023,7 @@ class ParloopExecutor:
         if V.ufl_element().family() == "Real":
             return op2.GlobalParloopArg(dat)
         else:
-            return op2.DatParloopArg(dat, self._get_map(V, self._kinfo.integral_type))
+            return op2.DatParloopArg(dat, self._get_map(V))
 
 
     def rank2stuff(self, tensor, Vrow, Vcol):
@@ -1027,15 +1031,15 @@ class ParloopExecutor:
             if Vcol.ufl_element().family() == "Real":
                 return op2.GlobalParloopArg(tensor.handle.getPythonContext().global_)
             else:
-                mp = self._get_map(Vcol, self._kinfo.integral_type)
+                mp = self._get_map(Vcol)
                 return op2.DatParloopArg(tensor.handle.getPythonContext().dat, mp)
         else:
             if Vcol.ufl_element().family() == "Real":
-                mp = self._get_map(Vrow, self._kinfo.integral_type)
+                mp = self._get_map(Vrow)
                 return op2.DatParloopArg(tensor.handle.getPythonContext().dat, mp)
             else:
-                rmap = self._get_map(Vrow, self._kinfo.integral_type)
-                cmap = self._get_map(Vcol, self._kinfo.integral_type)
+                rmap = self._get_map(Vrow)
+                cmap = self._get_map(Vcol)
                 return op2.MatParloopArg(tensor, (rmap, cmap), lgmaps=(self._lgmaps,))
 
 
@@ -1050,73 +1054,8 @@ def _as_parloop_arg(tsfc_arg, self):
     raise NotImplementedError
 
 
-@_as_parloop_arg.register(kernel_args.CoordinatesKernelArg)
-def _as_parloop_arg_coordinates(_, self):
-    kinfo = self._kinfo
-    mesh = self.mesh
-    func = mesh.coordinates
-    map_ = self._get_map(func.function_space(), kinfo.integral_type)
-    return op2.DatParloopArg(func.dat, map_)
-
-
-@_as_parloop_arg.register(kernel_args.CellOrientationsKernelArg)
-def _as_parloop_arg_cell_orientations(_, self):
-    kinfo = self._kinfo
-    mesh = self.mesh
-    func = mesh.cell_orientations()
-    map_ = self._get_map(func.function_space(), kinfo.integral_type)
-    return op2.DatParloopArg(func.dat, map_)
-
-
-@_as_parloop_arg.register(kernel_args.CellSizesKernelArg)
-def _(_, self):
-    kinfo = self._kinfo
-    mesh = self.mesh
-    func = mesh.cell_sizes
-    map_ = self._get_map(func.function_space(), kinfo.integral_type)
-    return op2.DatParloopArg(func.dat, map_)
-
-
-@_as_parloop_arg.register(kernel_args.ExteriorFacetKernelArg)
-def _(_, self):
-    mesh = self.mesh
-    return op2.DatParloopArg(mesh.exterior_facets.local_facet_dat)
-
-
-@_as_parloop_arg.register(kernel_args.InteriorFacetKernelArg)
-def _(_, self):
-    mesh = self.mesh
-    return op2.DatParloopArg(mesh.interior_facets.local_facet_dat)
-
-
-@_as_parloop_arg.register(CellFacetKernelArg)
-def _(_, self):
-    mesh = self.mesh
-    return op2.DatParloopArg(mesh.cell_to_facets)
-
-
-@_as_parloop_arg.register(kernel_args.ConstantKernelArg)
-def _(_, self):
-    coeff = next(self.coeffs_iterator)
-    return op2.GlobalParloopArg(coeff.dat)
-
-
-@_as_parloop_arg.register(kernel_args.CoefficientKernelArg)
-def _(_, self):
-    kinfo = self._kinfo
-
-    coeff = next(self.coeffs_iterator)
-    return op2.DatParloopArg(coeff.dat, self._get_map(coeff.function_space(), kinfo.integral_type))
-
-
-@_as_parloop_arg.register(LayerCountKernelArg)
-def _(_, self):
-    glob = op2.Global(LayerCountKernelArg.shape, self._iterset.layers-2, dtype=LayerCountKernelArg.dtype)
-    return op2.GlobalParloopArg(glob)
-
-
 @_as_parloop_arg.register(kernel_args.OutputKernelArg)
-def _(_, self):
+def _as_parloop_arg_output(_, self):
     arguments = self._form.arguments()
 
     if len(arguments) == 0:
@@ -1152,6 +1091,62 @@ def _(_, self):
             return self.rank2stuff(self._tensor.M, *func_spaces)
         else:
             raise AssertionError
+
+
+@_as_parloop_arg.register(kernel_args.CoordinatesKernelArg)
+def _as_parloop_arg_coordinates(_, self):
+    func = self.mesh.coordinates
+    map_ = self._get_map(func.function_space())
+    return op2.DatParloopArg(func.dat, map_)
+
+
+@_as_parloop_arg.register(kernel_args.ConstantKernelArg)
+def _as_parloop_arg_constant(_, self):
+    coeff = next(self.coeffs_iterator)
+    return op2.GlobalParloopArg(coeff.dat)
+
+
+@_as_parloop_arg.register(kernel_args.CoefficientKernelArg)
+def _as_parloop_arg_coefficient(_, self):
+    coeff = next(self.coeffs_iterator)
+    mp = self._get_map(coeff.function_space())
+    return op2.DatParloopArg(coeff.dat, mp)
+
+
+@_as_parloop_arg.register(kernel_args.CellOrientationsKernelArg)
+def _as_parloop_arg_cell_orientations(_, self):
+    func = self.mesh.cell_orientations()
+    mp = self._get_map(func.function_space())
+    return op2.DatParloopArg(func.dat, mp)
+
+
+@_as_parloop_arg.register(kernel_args.CellSizesKernelArg)
+def _as_parloop_arg_cell_sizes(_, self):
+    func = self.mesh.cell_sizes
+    mp = self._get_map(func.function_space())
+    return op2.DatParloopArg(func.dat, mp)
+
+
+@_as_parloop_arg.register(kernel_args.ExteriorFacetKernelArg)
+def _as_parloop_arg_exterior_facet(_, self):
+    return op2.DatParloopArg(self.mesh.exterior_facets.local_facet_dat)
+
+
+@_as_parloop_arg.register(kernel_args.InteriorFacetKernelArg)
+def _as_parloop_arg_interior_facet(_, self):
+    return op2.DatParloopArg(self.mesh.interior_facets.local_facet_dat)
+
+
+@_as_parloop_arg.register(CellFacetKernelArg)
+def _as_parloop_arg_cell_facet(_, self):
+    return op2.DatParloopArg(self.mesh.cell_to_facets)
+
+
+@_as_parloop_arg.register(LayerCountKernelArg)
+def _as_parloop_arg_layer_count(_, self):
+    glob = op2.Global(LayerCountKernelArg.shape, self._iterset.layers-2,
+                      dtype=LayerCountKernelArg.dtype)
+    return op2.GlobalParloopArg(glob)
 
 
 def _execute_parloop(*args, **kwargs):
