@@ -295,8 +295,7 @@ class _FormAssembler(abc.ABC):
                 for tsfc_knl in tsfc_knls]
 
         for tknl, knl in zip(tsfc_knls, knls):
-            iterset = _get_iterset(form, tknl.kinfo, all_integer_subdomain_ids)
-            _execute_parloop(form, tknl, knl, iterset, tensor=self._tensor,
+            _execute_parloop(form, tknl, knl, all_integer_subdomain_ids, tensor=self._tensor,
                              diagonal=self.diagonal,
                              lgmaps=self.collect_lgmaps(tknl, bcs))
 
@@ -985,7 +984,7 @@ def _make_wrapper_kernel(*args, **kwargs):
 
 class ParloopExecutor:
 
-    def __init__(self, form, split_knl, knl, iterset, *, tensor=None, diagonal=False, lgmaps=None):
+    def __init__(self, form, split_knl, knl, all_integer_subdomain_ids, *, tensor=None, diagonal=False, lgmaps=None):
         """
 
         .. note::
@@ -995,12 +994,14 @@ class ParloopExecutor:
         """
         self._form = form
         self._split_knl = split_knl
+        self._all_integer_subdomain_ids = all_integer_subdomain_ids
         self._kinfo = split_knl.kinfo
         self._knl = knl
-        self._iterset = iterset
         self._tensor = tensor
         self._diagonal = diagonal
         self._lgmaps = lgmaps
+
+        self._iterset = self._get_iterset()
 
     def run(self):
         kinfo = self._split_knl.kinfo
@@ -1044,6 +1045,19 @@ class ParloopExecutor:
             return func_space.interior_facet_node_map()
         else:
             raise AssertionError
+
+    def _get_iterset(self):
+        mesh = self._form.ufl_domains()[self._kinfo.domain_number]
+        subdomain_data = self._form.subdomain_data()[mesh].get(self._kinfo.integral_type, None)
+        if subdomain_data is not None:
+            if self._kinfo.integral_type != "cell":
+                raise NotImplementedError("subdomain_data only supported with cell integrals")
+            if self._kinfo.subdomain_id not in ["everywhere", "otherwise"]:
+                raise ValueError("Cannot use subdomain data and subdomain_id")
+            return subdomain_data
+        else:
+            return mesh.measure_set(self._kinfo.integral_type, self._kinfo.subdomain_id,
+                                    self._all_integer_subdomain_ids)
 
 
 # TODO Make into a singledispatchmethod when we have Python 3.8
@@ -1212,20 +1226,6 @@ def _tuplify(params):
 
     assert isinstance(params, dict)
     return tuple((k, _tuplify(params[k])) for k in sorted(params))
-
-
-def _get_iterset(expr, kinfo, all_integer_subdomain_ids):
-    mesh = expr.ufl_domains()[kinfo.domain_number]
-    subdomain_data = expr.subdomain_data()[mesh].get(kinfo.integral_type, None)
-    if subdomain_data is not None:
-        if kinfo.integral_type != "cell":
-            raise NotImplementedError("subdomain_data only supported with cell integrals")
-        if kinfo.subdomain_id not in ["everywhere", "otherwise"]:
-            raise ValueError("Cannot use subdomain data and subdomain_id")
-        return subdomain_data
-    else:
-        return mesh.measure_set(kinfo.integral_type, kinfo.subdomain_id,
-                                all_integer_subdomain_ids)
 
 
 def _get_all_integer_subdomain_ids(knls):
