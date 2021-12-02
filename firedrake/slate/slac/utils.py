@@ -343,4 +343,4 @@ def merge_loopy(slate_loopy, output_arg, builder, var2terminal, name):
         if isinstance(slate_wrapper.callables_table[name], CallableKernel):
             slate_wrapper = _match_caller_callee_argument_dimension_(slate_wrapper, name)
 
-    return slate_wrapper, kernel_args
+    return slate_wrapper, tuple(kernel_args)

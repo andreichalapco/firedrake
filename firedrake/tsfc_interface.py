@@ -182,6 +182,7 @@ def make_tsfc_kernel(form, name, parameters, number_map, interface, coffee=False
             pyop2_kernel = pyop2_interface.as_pyop2_local_kernel(
                 kernel.ast, kernel.name, kernel.arguments, flop_count=kernel.flop_count, opts=opts
             )
+            arguments = tuple(kernel.arguments) if kernel.arguments is not None else None
             kernels.append(KernelInfo(kernel=pyop2_kernel,
                                       integral_type=kernel.integral_type,
                                       oriented=kernel.oriented,
@@ -191,7 +192,7 @@ def make_tsfc_kernel(form, name, parameters, number_map, interface, coffee=False
                                       needs_cell_facets=False,
                                       pass_layer_arg=False,
                                       needs_cell_sizes=kernel.needs_cell_sizes,
-                                      tsfc_kernel_args=tuple(kernel.arguments)))
+                                      tsfc_kernel_args=arguments))
         res = TSFCKernel(kernels)
 
         if comm.rank == 0:

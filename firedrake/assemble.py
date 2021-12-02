@@ -263,26 +263,26 @@ class _FormAssembler(abc.ABC):
     def diagonal(self):
         ...
 
-    def compile_form(self):
+    def compile_form(self, form):
         try:
-            topology, = set(d.topology for d in self._form.ufl_domains())
+            topology, = set(d.topology for d in form.ufl_domains())
         except ValueError:
             raise NotImplementedError("All integration domains must share a mesh topology")
 
-        for o in itertools.chain(self._form.arguments(), self._form.coefficients()):
+        for o in itertools.chain(form.arguments(), form.coefficients()):
             domain = o.ufl_domain()
             if domain is not None and domain.topology != topology:
                 raise NotImplementedError("Assembly with multiple meshes is not supported")
 
-        if isinstance(self._form, ufl.Form):
+        if isinstance(form, ufl.Form):
             return tsfc_interface.compile_form(
-                self._form, "form",
+                form, "form",
                 diagonal=self.diagonal,
                 parameters=self._form_compiler_params
             )
-        elif isinstance(self._form, slate.TensorBase):
+        elif isinstance(form, slate.TensorBase):
             return slac.compile_expression(
-                self._form, compiler_parameters=self._form_compiler_params
+                form, compiler_parameters=self._form_compiler_params
             )
         else:
             raise AssertionError
@@ -306,7 +306,7 @@ class _ZeroFormAssembler(_FormAssembler):
         return self._tensor.data[0]
 
     def assemble(self):
-        tsfc_knls = self.compile_form()
+        tsfc_knls = self.compile_form(self._form)
         all_integer_subdomain_ids = _get_all_integer_subdomain_ids(tsfc_knls)
 
         knls = [_make_wrapper_kernel( self._form, k, all_integer_subdomain_ids) for k in tsfc_knls]
@@ -365,7 +365,7 @@ class _OneFormAssembler(_FormAssembler):
             form = self._form
             bcs = self._bcs
 
-        tsfc_knls = self.compile_form()
+        tsfc_knls = self.compile_form(form)
         all_integer_subdomain_ids = _get_all_integer_subdomain_ids(tsfc_knls)
 
         knls = [_make_wrapper_kernel(form, tsfc_knl, all_integer_subdomain_ids, diagonal=self._diagonal)
@@ -458,7 +458,7 @@ class _TwoFormAssembler(_FormAssembler):
             expr = self._form
             bcs = self._bcs
 
-        tsfc_knls = self.compile_form()
+        tsfc_knls = self.compile_form(expr)
         all_integer_subdomain_ids = _get_all_integer_subdomain_ids(tsfc_knls)
 
         knls = [_make_wrapper_kernel(expr, k, all_integer_subdomain_ids)
@@ -647,7 +647,7 @@ class _AssembleWrapperKernelBuilder:
         self._expr = expr
         self._indices, self._kinfo = split_knl
         self._diagonal = diagonal
-        self.all_integer_subdomain_ids = all_integer_subdomain_ids
+        self.all_integer_subdomain_ids = all_integer_subdomain_ids.get(self._kinfo.integral_type, None)
 
     def build(self):
         # TODO This is a hack. Make this class take kinfo as a constructor arg
@@ -701,17 +701,10 @@ class _AssembleWrapperKernelBuilder:
         if subdomain_data is not None:
             return True
 
-        if self._kinfo.integral_type in {"exterior_facet_bottom",
-                                   "exterior_facet_top",
-                                   "interior_facet_horiz"}:
-            return True
-
         if self._kinfo.subdomain_id == "everywhere":
             return False
-        if self._kinfo.subdomain_id == "otherwise":
-            if self.all_integer_subdomain_ids is None:
-                return False
-            return True
+        elif self._kinfo.subdomain_id == "otherwise":
+            return self.all_integer_subdomain_ids is not None
         else:
             return True
 
@@ -836,7 +829,7 @@ def _as_wrapper_kernel_arg_coefficient(_, self):
 
 @_as_wrapper_kernel_arg.register(kernel_args.CellSizesKernelArg)
 def _as_wrapper_kernel_arg_cell_sizes(_, self):
-    domain = FormExplorer(self._expr).get_domain(self.kinfo)
+    domain = FormExplorer(self._expr).get_domain(self._kinfo)
     # See set_cell_sizes from tsfc.kernel_interface.firedrake_loopy
     ufl_element = ufl.FiniteElement("P", domain.ufl_cell(), 1)
     finat_element = create_element(ufl_element)
@@ -884,7 +877,7 @@ def _(_, self):
 @_as_wrapper_kernel_arg.register(CellFacetKernelArg)
 def _(_, self):
     # TODO Share this functionality with Slate kernel_builder.py
-    domain = FormExplorer(self._expr).get_domain(self.kinfo)
+    domain = FormExplorer(self._expr).get_domain(self._kinfo)
     if domain.extruded:
         # TODO This is not sufficiently stripped
         num_facets = domain._base_mesh.ufl_cell().num_facets()
@@ -1250,4 +1243,4 @@ def _get_all_integer_subdomain_ids(knls):
 
     for k, v in all_integer_subdomain_ids.items():
         all_integer_subdomain_ids[k] = tuple(sorted(v))
-    return all_integer_subdomain_ids or None
+    return all_integer_subdomain_ids
