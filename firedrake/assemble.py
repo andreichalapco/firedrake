@@ -414,31 +414,28 @@ class _TwoFormAssembler(_FormAssembler):
         tensor=None,
         bcs=None,
         *,
-        mat_type=None,
-        sub_mat_type=None,
-        appctx=None,
-        form_compiler_parameters=None,
-        options_prefix=None,
+        mat_type,
+        sub_mat_type,
+        form_compiler_parameters,
+        options_prefix,
     ):
         super().__init__(form, form_compiler_parameters=form_compiler_parameters)
 
         mat_type, sub_mat_type = self._get_mat_type(mat_type, sub_mat_type, form.arguments())
 
+        assert mat_type != "matfree"
+
         if tensor:
-            if mat_type != "matfree":
-                tensor.M.zero()
-            if tensor.a.arguments() != form.arguments():
-                raise ValueError("Form's arguments do not match provided result tensor")
+            tensor.M.zero()
         else:
             tensor = allocate_matrix(
-                form, bcs, mat_type=mat_type, sub_mat_type=sub_mat_type, appctx=appctx,
+                form, bcs, mat_type=mat_type, sub_mat_type=sub_mat_type,
                 form_compiler_parameters=form_compiler_parameters,
                 options_prefix=options_prefix
             )
 
         self._tensor = tensor
         self._bcs = bcs
-        self._is_matfree = mat_type == "matfree"
 
     @property
     def bcs(self):
@@ -446,10 +443,7 @@ class _TwoFormAssembler(_FormAssembler):
 
     @property
     def result(self):
-        if not self._is_matfree:
-            self._tensor.M.assemble()
-        else:
-            self._tensor.assemble()
+        self._tensor.M.assemble()
         return self._tensor
 
     def _needs_unrolling(self, all_bcs, Vrow, Vcol, i, j):
@@ -510,53 +504,6 @@ class _TwoFormAssembler(_FormAssembler):
         rlgmap = Vrow[i].local_to_global_map(bcrow, lgmap=rlgmap)
         clgmap = Vcol[j].local_to_global_map(bccol, lgmap=clgmap)
         return rlgmap, clgmap
-
-    # def assemble_inner(self, expr, bcs):
-    #     raise NotImplementedError
-    #     if self._is_matfree:
-    #         return
-    #
-    #     # tsfc_knls = self.compile_form(expr)
-    #     # all_integer_subdomain_ids = _get_all_integer_subdomain_ids(tsfc_knls)
-    #     #
-    #     # knls = [_make_wrapper_kernel(expr, k, all_integer_subdomain_ids)
-    #     #         for k in tsfc_knls]
-    #     #
-    #     for tknl, knl in zip(tsfc_knls, knls):
-    #         indices, kinfo = tknl
-    #
-    #
-    #         test, trial = expr.arguments()
-    #         Vrow = test.function_space()
-    #         Vcol = trial.function_space()
-    #         row, col = indices
-    #         if row is None and col is None:
-    #             lgmaps, unroll = zip(*(self._collect_lgmaps(self._tensor, bcs, Vrow, Vcol, i, j)
-    #                                    for i, j in numpy.ndindex(self._tensor.block_shape)))
-    #             unroll = any(unroll)
-    #         else:
-    #             assert row is not None and col is not None
-    #             lgmaps, unroll = self._collect_lgmaps(self._tensor, bcs, Vrow, Vcol, row, col)
-    #
-    #         # If we need to handle boundary conditions then replace the first argument to
-    #         # the wrapper kernel.
-    #         if unroll:
-    #             old_arg = knl.arguments[0]
-    #             if isinstance(old_arg, op2.MatWrapperKernelArg):
-    #                 new_arg = dataclasses.replace(old_arg, unroll=True)
-    #             elif isinstance(old_arg, op2.MixedMatWrapperKernelArg):
-    #                 new_arguments = tuple(dataclasses.replace(subarg, unroll=True)
-    #                                       for subarg in old_arg.arguments)
-    #                 new_arg = dataclasses.replace(old_arg, arguments=new_arguments)
-    #             else:
-    #                 raise AssertionError
-    #             knl = pyop2.wrapper_kernel.replace_argument(knl, old_arg, new_arg)
-    #
-    #         # iterset = _get_iterset(expr, kinfo, all_integer_subdomain_ids)
-    #         # _execute_parloop(expr, tknl, knl, iterset, tensor=self._tensor, lgmaps=lgmaps)
-    #
-    #     for bc in bcs:
-    #         self._apply_bc(bc)
 
     def _apply_bc(self, bc):
         if isinstance(bc, DirichletBC):
@@ -622,7 +569,14 @@ class _TwoFormAssembler(_FormAssembler):
         return mat_type, sub_mat_type
 
 
-def _assemble_form(form, tensor=None, bcs=None, *, assembly_type=AssemblyType.SOLUTION, diagonal=False, **kwargs):
+def _assemble_form(form, tensor=None, bcs=None, *,
+                   assembly_type=AssemblyType.SOLUTION,
+                   diagonal=False,
+                   mat_type=None,
+                   sub_mat_type=None,
+                   appctx=None,
+                   options_prefix=None,
+                   form_compiler_parameters=None):
     """Assemble a form.
 
     :arg form:
@@ -646,12 +600,31 @@ def _assemble_form(form, tensor=None, bcs=None, *, assembly_type=AssemblyType.SO
     rank = len(form.arguments())
     if rank == 0:
         assert tensor is None and bcs == ()
-        return _ZeroFormAssembler(form, **kwargs).assemble()
+        return _ZeroFormAssembler(form, form_compiler_parameters=form_compiler_parameters).assemble()
     elif rank == 1 or (rank == 2 and diagonal):
         return _OneFormAssembler(form, tensor, bcs, assembly_type=assembly_type,
-                                 diagonal=diagonal, **kwargs).assemble()
+                                 diagonal=diagonal, form_compiler_parameters=form_compiler_parameters).assemble()
     elif rank == 2:
-        return _TwoFormAssembler(form, tensor, bcs, **kwargs).assemble()
+        if tensor is not None:
+            if tensor.a.arguments() != form.arguments():
+                raise ValueError("Form's arguments do not match provided result tensor")
+        # We do something radically different form matrix free - intercept here
+        if mat_type == "matfree":
+            if tensor is None:
+                tensor = allocate_matrix(
+                    form, bcs, mat_type=mat_type, sub_mat_type=sub_mat_type, appctx=appctx,
+                    form_compiler_parameters=form_compiler_parameters,
+                    options_prefix=options_prefix
+                )
+            tensor.assemble()
+            return tensor
+        else:
+            assembler = _TwoFormAssembler(form, tensor, bcs,
+                                          mat_type=mat_type,
+                                          sub_mat_type=sub_mat_type,
+                                          form_compiler_parameters=form_compiler_parameters,
+                                          options_prefix=options_prefix)
+            return assembler.assemble()
     else:
         raise AssertionError
 
@@ -672,7 +645,6 @@ class _AssembleWrapperKernelBuilder:
         self.all_integer_subdomain_ids = all_integer_subdomain_ids.get(self._kinfo.integral_type, None)
 
     def build(self):
-        # TODO This is a hack. Make this class take kinfo as a constructor arg
         domain = FormExplorer(self._expr).get_domain(self._kinfo)
         extruded = domain.extruded
         constant_layers = extruded and not domain.variable_layers
