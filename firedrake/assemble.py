@@ -1095,15 +1095,17 @@ def _(_, self):
 def _(_, self):
     kinfo = self._kinfo
     # For real assembly self._tensor is a Function, for normal assembly it is a Global.
-    if isinstance(self._tensor, op2.Global):
+    # if isinstance(self._tensor, op2.Global):
+    arguments = self._form.arguments()
+    if len(arguments) == 0:
         return op2.GlobalParloopArg(self._tensor)
-    elif isinstance(self._tensor, firedrake.Function):
+    elif len(arguments) == 1 or (len(arguments) == 2 and self._diagonal):
         i, = self._split_knl.indices
         if i is None:
             return op2.GlobalParloopArg(self._tensor.dat)
         else:
             return op2.GlobalParloopArg(self._tensor.dat[i])
-    elif isinstance(self._tensor, firedrake.matrix.Matrix):
+    elif len(arguments) == 2:
         # Matrices also have to handle global blocks
         i, j = self._split_knl.indices
         test, trial = self._tensor.a.arguments()
