@@ -256,7 +256,6 @@ class _FormAssembler(abc.ABC):
         self.assemble_inner(self._form, self.bcs)
         return self.result
 
-
     @abc.abstractproperty
     def diagonal(self):
         ...
@@ -331,16 +330,9 @@ class _ZeroFormAssembler(_FormAssembler):
 
 class _OneFormAssembler(_FormAssembler):
 
-    def __init__(
-        self,
-        form,
-        tensor=None,
-        bcs=None,
-        *,
-        assembly_type=AssemblyType.SOLUTION,
-        diagonal=False,
-        **kwargs
-    ):
+    def __init__(self, form, tensor=None, bcs=None, *,
+                 assembly_type=AssemblyType.SOLUTION,
+                 diagonal=False, **kwargs):
         super().__init__(form, **kwargs)
 
         if diagonal:
@@ -404,17 +396,9 @@ class _TwoFormAssembler(_FormAssembler):
     diagonal = False
     """Diagonal assembly not possible for two forms."""
 
-    def __init__(
-        self,
-        form,
-        tensor=None,
-        bcs=None,
-        *,
-        mat_type,
-        sub_mat_type,
-        form_compiler_parameters,
-        options_prefix,
-    ):
+    def __init__(self, form, tensor=None, bcs=None, *,
+                 mat_type, sub_mat_type, form_compiler_parameters,
+                 options_prefix):
         super().__init__(form, form_compiler_parameters=form_compiler_parameters)
 
         mat_type, sub_mat_type = self._get_mat_type(mat_type, sub_mat_type, form.arguments())
@@ -641,7 +625,7 @@ class _AssembleWrapperKernelBuilder:
         self.all_integer_subdomain_ids = all_integer_subdomain_ids.get(self._kinfo.integral_type, None)
 
     def build(self):
-        domain = FormExplorer(self._expr).get_domain(self._kinfo)
+        domain = self.mesh
         extruded = domain.extruded
         constant_layers = extruded and not domain.variable_layers
 
@@ -682,12 +666,15 @@ class _AssembleWrapperKernelBuilder:
             subset=subset
         )
 
-    def subset(self):
-        domain = FormExplorer(self._expr).get_domain(self._kinfo)
+    # TODO I copy this for parloops too
+    @functools.cached_property
+    def mesh(self):
+        return self._expr.ufl_domains()[self._kinfo.domain_number]
 
+    def subset(self):
         # Assume that if subdomain_data is not None then we are dealing with
         # a subset. This is potentially a bit dodgy.
-        subdomain_data = self._expr.subdomain_data()[domain].get(self._kinfo.integral_type, None)
+        subdomain_data = self._expr.subdomain_data()[self.mesh].get(self._kinfo.integral_type, None)
         if subdomain_data is not None:
             return True
 
@@ -797,7 +784,7 @@ def _as_wrapper_kernel_arg(tsfc_arg, self):
 
 @_as_wrapper_kernel_arg.register(kernel_args.CoordinatesKernelArg)
 def _as_wrapper_kernel_arg_coordinates(_, self):
-    domain = FormExplorer(self._expr).get_domain(self._kinfo)
+    domain = self.mesh
     finat_element = create_element(domain.ufl_coordinate_element())
     return self._make_dat_wrapper_kernel_arg(finat_element)
 
@@ -819,7 +806,7 @@ def _as_wrapper_kernel_arg_coefficient(_, self):
 
 @_as_wrapper_kernel_arg.register(kernel_args.CellSizesKernelArg)
 def _as_wrapper_kernel_arg_cell_sizes(_, self):
-    domain = FormExplorer(self._expr).get_domain(self._kinfo)
+    domain = self.mesh
     # See set_cell_sizes from tsfc.kernel_interface.firedrake_loopy
     ufl_element = ufl.FiniteElement("P", domain.ufl_cell(), 1)
     finat_element = create_element(ufl_element)
@@ -867,7 +854,7 @@ def _(_, self):
 @_as_wrapper_kernel_arg.register(CellFacetKernelArg)
 def _(_, self):
     # TODO Share this functionality with Slate kernel_builder.py
-    domain = FormExplorer(self._expr).get_domain(self._kinfo)
+    domain = self.mesh
     if domain.extruded:
         # TODO This is not sufficiently stripped
         num_facets = domain._base_mesh.ufl_cell().num_facets()
@@ -922,31 +909,6 @@ class _ElementHandler:
     @property
     def _is_tensor_element(self):
         return isinstance(self._elem, finat.TensorFiniteElement)
-
-
-class FormExplorer:
-
-    def __init__(self, form):
-        self._form = form
-
-    def get_domain(self, kinfo):
-        return self._form.ufl_domains()[kinfo.domain_number]
-
-
-def _get_map_type(integral_type):
-    if integral_type in (
-        "cell",
-        "exterior_facet_top",
-        "exterior_facet_bottom",
-        "interior_facet_horiz"
-    ):
-        return "cell"
-    elif integral_type in ("exterior_facet", "exterior_facet_vert"):
-        return "exterior_facet"
-    elif integral_type in ("interior_facet", "interior_facet_vert"):
-        return "interior_facet"
-    else:
-        raise AssertionError
 
 
 def _wrapper_kernel_cache_key(form, split_knl, all_integer_subdomain_ids, **kwargs):
@@ -1022,23 +984,21 @@ class ParloopExecutor:
             raise RuntimeError("Integral measure does not match measure of all "
                                "coefficients/arguments")
 
-
-    def _get_mesh(self, tsfc_kernel):
-        return FormExplorer(self._form).get_domain(tsfc_kernel.kinfo)
-
+    @functools.cached_property
+    def mesh(self):
+        return self._form.ufl_domains()[self._kinfo.domain_number]
 
     @staticmethod
     def _get_map(func_space, integral_type):
         """TODO"""
         assert isinstance(func_space, ufl.FunctionSpace)
 
-        map_type = _get_map_type(integral_type)
-
-        if map_type == "cell":
+        if integral_type in {"cell", "exterior_facet_top", "exterior_facet_bottom",
+                             "interior_facet_horiz"}:
             return func_space.cell_node_map()
-        elif map_type == "exterior_facet":
+        elif integral_type in {"exterior_facet", "exterior_facet_vert"}:
             return func_space.exterior_facet_node_map()
-        elif map_type == "interior_facet":
+        elif integral_type in {"interior_facet", "interior_facet_vert"}:
             return func_space.interior_facet_node_map()
         else:
             raise AssertionError
@@ -1069,7 +1029,7 @@ def _as_parloop_arg(tsfc_arg, self):
 @_as_parloop_arg.register(kernel_args.CoordinatesKernelArg)
 def _as_parloop_arg_coordinates(_, self):
     kinfo = self._kinfo
-    mesh = self._get_mesh(self._split_knl)
+    mesh = self.mesh
     func = mesh.coordinates
     map_ = self._get_map(func.function_space(), kinfo.integral_type)
     return op2.DatParloopArg(func.dat, map_)
@@ -1078,7 +1038,7 @@ def _as_parloop_arg_coordinates(_, self):
 @_as_parloop_arg.register(kernel_args.CellOrientationsKernelArg)
 def _as_parloop_arg_cell_orientations(_, self):
     kinfo = self._kinfo
-    mesh = self._get_mesh(self._split_knl)
+    mesh = self.mesh
     func = mesh.cell_orientations()
     map_ = self._get_map(func.function_space(), kinfo.integral_type)
     return op2.DatParloopArg(func.dat, map_)
@@ -1087,7 +1047,7 @@ def _as_parloop_arg_cell_orientations(_, self):
 @_as_parloop_arg.register(kernel_args.CellSizesKernelArg)
 def _(_, self):
     kinfo = self._kinfo
-    mesh = self._get_mesh(self._split_knl)
+    mesh = self.mesh
     func = mesh.cell_sizes
     map_ = self._get_map(func.function_space(), kinfo.integral_type)
     return op2.DatParloopArg(func.dat, map_)
@@ -1095,19 +1055,19 @@ def _(_, self):
 
 @_as_parloop_arg.register(kernel_args.ExteriorFacetKernelArg)
 def _(_, self):
-    mesh = self._get_mesh(self._split_knl)
+    mesh = self.mesh
     return op2.DatParloopArg(mesh.exterior_facets.local_facet_dat)
 
 
 @_as_parloop_arg.register(kernel_args.InteriorFacetKernelArg)
 def _(_, self):
-    mesh = self._get_mesh(self._split_knl)
+    mesh = self.mesh
     return op2.DatParloopArg(mesh.interior_facets.local_facet_dat)
 
 
 @_as_parloop_arg.register(CellFacetKernelArg)
 def _(_, self):
-    mesh = self._get_mesh(self._split_knl)
+    mesh = self.mesh
     return op2.DatParloopArg(mesh.cell_to_facets)
 
 
