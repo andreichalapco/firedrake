@@ -1,8 +1,5 @@
 import abc
-import collections
-from collections import OrderedDict, defaultdict
-import dataclasses
-from dataclasses import dataclass
+from collections import OrderedDict
 from enum import IntEnum, auto
 import functools
 import itertools
@@ -23,7 +20,7 @@ from firedrake.functionspacedata import entity_dofs_key, entity_permutations_key
 from firedrake.petsc import PETSc
 from firedrake.slate import slac, slate
 from firedrake.slate.slac.kernel_builder import CellFacetKernelArg, LayerCountKernelArg, LayerKernelArg
-from firedrake.utils import ScalarType
+from firedrake.utils import ScalarType, tuplify
 from pyop2 import op2
 import pyop2.wrapper_kernel
 from pyop2.exceptions import MapValueError, SparsityFormatError
@@ -287,7 +284,7 @@ class _FormAssembler(abc.ABC):
 
     def assemble_inner(self, form, bcs):
         tsfc_knls = self.compile_form(form)
-        all_integer_subdomain_ids = _get_all_integer_subdomain_ids(tsfc_knls)
+        all_integer_subdomain_ids = tsfc_interface.gather_integer_subdomain_ids(tsfc_knls)
 
         knls = [_make_wrapper_kernel(form, tsfc_knl, all_integer_subdomain_ids,
                                      diagonal=self.diagonal,
@@ -973,7 +970,7 @@ def _wrapper_kernel_cache_key(form, split_knl, all_integer_subdomain_ids, **kwar
 
     return ((sig,)
             + tuple(subdomain_key)
-            + _tuplify(all_integer_subdomain_ids)
+            + tuplify(all_integer_subdomain_ids)
             + cachetools.keys.hashkey(split_knl, **kwargs))
 
 
@@ -1217,24 +1214,3 @@ def _(_, self):
 
 def _execute_parloop(*args, **kwargs):
     ParloopExecutor(*args, **kwargs).run()
-
-
-# TODO put in utils
-def _tuplify(params):
-    if isinstance(params, collections.Hashable):
-        return (params,)
-
-    assert isinstance(params, dict)
-    return tuple((k, _tuplify(params[k])) for k in sorted(params))
-
-
-def _get_all_integer_subdomain_ids(knls):
-    # These will be used to correctly interpret the "otherwise" subdomain
-    all_integer_subdomain_ids = defaultdict(list)
-    for _, kinfo in knls:
-        if kinfo.subdomain_id != "otherwise":
-            all_integer_subdomain_ids[kinfo.integral_type].append(kinfo.subdomain_id)
-
-    for k, v in all_integer_subdomain_ids.items():
-        all_integer_subdomain_ids[k] = tuple(sorted(v))
-    return all_integer_subdomain_ids

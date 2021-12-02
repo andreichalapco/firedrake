@@ -6,6 +6,7 @@ passing to the backends.
 """
 import pickle
 
+import collections
 from cachetools import cached, LRUCache
 from dataclasses import dataclass
 from hashlib import md5
@@ -316,3 +317,19 @@ def _ensure_cachedir(comm=None):
     comm = comm or COMM_WORLD
     if comm.rank == 0:
         makedirs(TSFCKernel._cachedir, exist_ok=True)
+
+
+def gather_integer_subdomain_ids(knls):
+    """TODO
+
+    :arg knls: Iterable of :class:`SplitKernel` objects.
+    """
+    # These will be used to correctly interpret the "otherwise" subdomain
+    all_integer_subdomain_ids = collections.defaultdict(list)
+    for _, kinfo in knls:
+        if kinfo.subdomain_id != "otherwise":
+            all_integer_subdomain_ids[kinfo.integral_type].append(kinfo.subdomain_id)
+
+    for k, v in all_integer_subdomain_ids.items():
+        all_integer_subdomain_ids[k] = tuple(sorted(v))
+    return all_integer_subdomain_ids
