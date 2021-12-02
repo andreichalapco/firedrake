@@ -243,27 +243,30 @@ def create_assembly_callable(expr, tensor=None, bcs=None, form_compiler_paramete
 
 class _FormAssembler(abc.ABC):
 
-    def __init__(self, form, *, form_compiler_parameters=None):
+    def __init__(self, form, form_compiler_parameters=None):
         self._form = form
         self._form_compiler_params = form_compiler_parameters
-
-    @property
-    def form_compiler_params(self):
-        return self._form_compiler_params
 
     @abc.abstractproperty
     def result(self):
         ...
 
-    @abc.abstractmethod
-    def assemble(self, *args):
+    @abc.abstractproperty
+    def bcs(self):
         ...
+
+    def assemble(self):
+        self.assemble_inner(self._form, self.bcs)
+        return self.result
+
 
     @abc.abstractproperty
     def diagonal(self):
         ...
 
-    def compile_form(self, form):
+    def compile_form(self, form=None):
+        form = form or self._form
+
         try:
             topology, = set(d.topology for d in form.ufl_domains())
         except ValueError:
@@ -275,20 +278,18 @@ class _FormAssembler(abc.ABC):
                 raise NotImplementedError("Assembly with multiple meshes is not supported")
 
         if isinstance(form, ufl.Form):
-            return tsfc_interface.compile_form(
-                form, "form",
-                diagonal=self.diagonal,
-                parameters=self._form_compiler_params
-            )
+            return tsfc_interface.compile_form(form, "form", diagonal=self.diagonal,
+                                               parameters=self._form_compiler_params)
         elif isinstance(form, slate.TensorBase):
-            return slac.compile_expression(
-                form, compiler_parameters=self._form_compiler_params
-            )
+            return slac.compile_expression(form, compiler_parameters=self._form_compiler_params)
         else:
             raise AssertionError
 
 
 class _ZeroFormAssembler(_FormAssembler):
+
+    bcs = None
+    """Boundary conditions are not compatible with zero forms."""
 
     diagonal = False
     """Diagonal assembly not possible for zero forms."""
@@ -305,15 +306,17 @@ class _ZeroFormAssembler(_FormAssembler):
     def result(self):
         return self._tensor.data[0]
 
-    def assemble(self):
-        tsfc_knls = self.compile_form(self._form)
+    def assemble_inner(self, form, bcs):
+        assert not bcs
+
+        tsfc_knls = self.compile_form()
         all_integer_subdomain_ids = _get_all_integer_subdomain_ids(tsfc_knls)
 
-        knls = [_make_wrapper_kernel( self._form, k, all_integer_subdomain_ids) for k in tsfc_knls]
+        knls = [_make_wrapper_kernel(form, k, all_integer_subdomain_ids) for k in tsfc_knls]
 
         for tknl, knl in zip(tsfc_knls, knls):
-            iterset = _get_iterset(self._form, tknl.kinfo, all_integer_subdomain_ids)
-            _execute_parloop(self._form, tknl, knl, iterset, tensor=self._tensor)
+            iterset = _get_iterset(form, tknl.kinfo, all_integer_subdomain_ids)
+            _execute_parloop(form, tknl, knl, iterset, tensor=self._tensor)
 
 
 class _OneFormAssembler(_FormAssembler):
@@ -355,16 +358,14 @@ class _OneFormAssembler(_FormAssembler):
         return self._diagonal
 
     @property
+    def bcs(self):
+        return self._bcs
+
+    @property
     def result(self):
         return self._tensor
 
-    def assemble(self, form=None, bcs=None):
-        # These arguments are optional in case we are calling this function recursively
-        if form is None:
-            assert bcs is None
-            form = self._form
-            bcs = self._bcs
-
+    def assemble_inner(self, form, bcs):
         tsfc_knls = self.compile_form(form)
         all_integer_subdomain_ids = _get_all_integer_subdomain_ids(tsfc_knls)
 
@@ -388,7 +389,7 @@ class _OneFormAssembler(_FormAssembler):
             if self._diagonal:
                 raise NotImplementedError("Diagonal assembly and EquationBC not supported")
             bc.zero(self._tensor)
-            self.assemble(bc.f, bc.bcs)
+            self.assemble_inner(bc.f, bc.bcs)
         else:
             raise AssertionError
 
@@ -442,6 +443,10 @@ class _TwoFormAssembler(_FormAssembler):
         self._is_matfree = mat_type == "matfree"
 
     @property
+    def bcs(self):
+        return self._bcs
+
+    @property
     def result(self):
         if not self._is_matfree:
             self._tensor.M.assemble()
@@ -449,14 +454,9 @@ class _TwoFormAssembler(_FormAssembler):
             self._tensor.assemble()
         return self._tensor
 
-    def assemble(self, expr=None, bcs=None):
+    def assemble_inner(self, expr, bcs):
         if self._is_matfree:
             return
-
-        if expr is None:
-            assert bcs is None
-            expr = self._form
-            bcs = self._bcs
 
         tsfc_knls = self.compile_form(expr)
         all_integer_subdomain_ids = _get_all_integer_subdomain_ids(tsfc_knls)
@@ -504,7 +504,7 @@ class _TwoFormAssembler(_FormAssembler):
         if isinstance(bc, DirichletBC):
             self._apply_dirichlet_bc(bc)
         elif isinstance(bc, EquationBCSplit):
-            self.assemble(bc.f, bc.bcs)
+            self.assemble_inner(bc.f, bc.bcs)
         else:
             raise AssertionError
 
@@ -623,16 +623,14 @@ def _assemble_form(form, tensor=None, bcs=None, *, assembly_type=AssemblyType.SO
     rank = len(form.arguments())
     if rank == 0:
         assert tensor is None and bcs == ()
-        assembler = _ZeroFormAssembler(form, **kwargs)
+        return _ZeroFormAssembler(form, **kwargs).assemble()
     elif rank == 1 or (rank == 2 and diagonal):
-        assembler = _OneFormAssembler(form, tensor, bcs, assembly_type=assembly_type, diagonal=diagonal, **kwargs)
+        return _OneFormAssembler(form, tensor, bcs, assembly_type=assembly_type,
+                                 diagonal=diagonal, **kwargs).assemble()
     elif rank == 2:
-        assembler = _TwoFormAssembler(form, tensor, bcs, **kwargs)
+        return _TwoFormAssembler(form, tensor, bcs, **kwargs).assemble()
     else:
         raise AssertionError
-
-    assembler.assemble()
-    return assembler.result
 
 
 class _AssembleWrapperKernelBuilder:
