@@ -1091,87 +1091,88 @@ def _(_, self):
     return op2.GlobalParloopArg(glob)
 
 
-@_as_parloop_arg.register(kernel_args.ScalarOutputKernelArg)
+@_as_parloop_arg.register(kernel_args.OutputKernelArg)
 def _(_, self):
     kinfo = self._kinfo
     # For real assembly self._tensor is a Function, for normal assembly it is a Global.
     # if isinstance(self._tensor, op2.Global):
     arguments = self._form.arguments()
+
     if len(arguments) == 0:
         return op2.GlobalParloopArg(self._tensor)
+
     elif len(arguments) == 1 or (len(arguments) == 2 and self._diagonal):
         i, = self._split_knl.indices
+        if self._diagonal:
+            arguments = arguments[0],
         if i is None:
-            return op2.GlobalParloopArg(self._tensor.dat)
+            Vs = [a.ufl_function_space() for a in arguments]
+            fs_count = len([V for V in Vs if V.ufl_element().family() != "Real"])
+            if fs_count == 0:
+                return op2.GlobalParloopArg(self._tensor.dat)
+            elif fs_count == 1:
+                return op2.DatParloopArg(
+                    self._tensor.dat, self._get_map(self._tensor.function_space(), kinfo.integral_type)
+                )
         else:
-            return op2.GlobalParloopArg(self._tensor.dat[i])
+            Vs = [a.ufl_function_space()[i] for a in arguments]
+            fs_count = len([V for V in Vs if V.ufl_element().family() != "Real"])
+
+            if fs_count == 0:
+                return op2.GlobalParloopArg(self._tensor.dat[i])
+            elif fs_count == 1:
+                return op2.DatParloopArg(
+                    self._tensor.dat[i],
+                    self._get_map(self._tensor.function_space()[i], kinfo.integral_type)
+                )
+            else:
+                raise AssertionError
+
     elif len(arguments) == 2:
-        # Matrices also have to handle global blocks
         i, j = self._split_knl.indices
         test, trial = self._tensor.a.arguments()
         if i is None and j is None:
-            rmap = self._get_map(test.function_space(), kinfo.integral_type)
-            cmap = self._get_map(trial.function_space(), kinfo.integral_type)
-            assert rmap is None and cmap is None
-            return op2.GlobalParloopArg(self._tensor.M.handle.getPythonContext().global_)
+            Vs = [a.ufl_function_space() for a in self._form.arguments()]
+            fs_count = len([V for V in Vs if V.ufl_element().family() != "Real"])
+            if fs_count == 0:
+                rmap = self._get_map(test.function_space(), kinfo.integral_type)
+                cmap = self._get_map(trial.function_space(), kinfo.integral_type)
+                assert rmap is None and cmap is None
+                return op2.GlobalParloopArg(self._tensor.M.handle.getPythonContext().global_)
+            elif fs_count == 1:
+                rmap = self._get_map(test.function_space(), kinfo.integral_type)
+                cmap = self._get_map(trial.function_space(), kinfo.integral_type)
+                map_ = rmap or cmap
+                return op2.DatParloopArg(tensor.M.handle.getPythonContext().dat, map_)
+            elif fs_count == 2:
+                rmap = self._get_map(test.function_space(), kinfo.integral_type)
+                cmap = self._get_map(trial.function_space(), kinfo.integral_type)
+                return op2.MatParloopArg(tensor.M, (rmap, cmap), lgmaps=tuple(self._lgmaps))
+            else:
+                raise AssertionError
         else:
             assert i is not None and j is not None
-            rmap = self._get_map(test.function_space()[i], kinfo.integral_type)
-            cmap = self._get_map(trial.function_space()[j], kinfo.integral_type)
-            assert rmap is None and cmap is None
-            return op2.GlobalParloopArg(self._tensor.M[i, j].handle.getPythonContext().global_)
+            Vs = [a.ufl_function_space()[x] for x, a in zip([i, j], self._form.arguments())]
+            fs_count = len([V for V in Vs if V.ufl_element().family() != "Real"])
+            if fs_count == 0:
+                rmap = self._get_map(test.function_space()[i], kinfo.integral_type)
+                cmap = self._get_map(trial.function_space()[j], kinfo.integral_type)
+                assert rmap is None and cmap is None
+                return op2.GlobalParloopArg(self._tensor.M[i, j].handle.getPythonContext().global_)
+            elif fs_count == 1:
+                rmap = self._get_map(test.function_space()[i], kinfo.integral_type)
+                cmap = self._get_map(trial.function_space()[j], kinfo.integral_type)
+                map_ = rmap or cmap
+                return op2.DatParloopArg(self._tensor.M[i, j].handle.getPythonContext().dat, map_)
+            elif fs_count == 2:
+                assert i is not None and j is not None
+                rmap = self._get_map(test.function_space()[i], kinfo.integral_type)
+                cmap = self._get_map(trial.function_space()[j], kinfo.integral_type)
+                return op2.MatParloopArg(self._tensor.M[i, j], (rmap, cmap), lgmaps=(self._lgmaps,))
+            else:
+                raise AssertionError
     else:
         raise AssertionError
-
-
-@_as_parloop_arg.register(kernel_args.VectorOutputKernelArg)
-def _(_, self):
-    tensor = self._tensor
-    kinfo = self._kinfo
-
-    # Handle global blocks (from real)
-    if isinstance(self._tensor, firedrake.matrix.Matrix):
-        i, j = self._split_knl.indices
-        test, trial = tensor.a.arguments()
-        if i is None and j is None:
-            rmap = self._get_map(test.function_space(), kinfo.integral_type)
-            cmap = self._get_map(trial.function_space(), kinfo.integral_type)
-            map_ = rmap or cmap
-            return op2.DatParloopArg(tensor.M.handle.getPythonContext().dat, map_)
-        else:
-            assert i is not None and j is not None
-            rmap = self._get_map(test.function_space()[i], kinfo.integral_type)
-            cmap = self._get_map(trial.function_space()[j], kinfo.integral_type)
-            map_ = rmap or cmap
-            return op2.DatParloopArg(tensor.M[i, j].handle.getPythonContext().dat, map_)
-
-    i, = self._split_knl.indices
-    if i is None:
-        return op2.DatParloopArg(
-            self._tensor.dat, self._get_map(self._tensor.function_space(), kinfo.integral_type)
-        )
-    else:
-        return op2.DatParloopArg(
-            self._tensor.dat[i],
-            self._get_map(self._tensor.function_space()[i], kinfo.integral_type)
-        )
-
-
-@_as_parloop_arg.register(kernel_args.MatrixOutputKernelArg)
-def _(_, self):
-    tensor = self._tensor
-    kinfo = self._kinfo
-    i, j = self._split_knl.indices
-    test, trial = tensor.a.arguments()
-    if i is None and j is None:
-        rmap = self._get_map(test.function_space(), kinfo.integral_type)
-        cmap = self._get_map(trial.function_space(), kinfo.integral_type)
-        return op2.MatParloopArg(tensor.M, (rmap, cmap), lgmaps=tuple(self._lgmaps))
-    else:
-        assert i is not None and j is not None
-        rmap = self._get_map(test.function_space()[i], kinfo.integral_type)
-        cmap = self._get_map(trial.function_space()[j], kinfo.integral_type)
-        return op2.MatParloopArg(tensor.M[i, j], (rmap, cmap), lgmaps=(self._lgmaps,))
 
 
 def _execute_parloop(*args, **kwargs):
