@@ -781,6 +781,34 @@ def _as_wrapper_kernel_arg(tsfc_arg, self):
     raise NotImplementedError
 
 
+@_as_wrapper_kernel_arg.register(kernel_args.OutputKernelArg)
+def _as_wrapper_kernel_arg_output(_, self):
+    arguments = self._expr.arguments()
+
+    # lower this
+    if len(arguments) == 0:
+        return op2.GlobalWrapperKernelArg((1,))
+
+    if self._diagonal:
+        test, trial = arguments
+        arguments = test,
+
+    function_spaces = self.get_function_spaces(arguments)
+    # need to drop real elements here since they correspond to global blocks
+    # (and the data structure loses a rank)
+    elems = [_ElementHandler(create_element(V.ufl_element()))
+             for V in function_spaces
+             if V.ufl_element().family() != "Real"]
+
+    if len(elems) == 0:
+        return op2.GlobalWrapperKernelArg((1,))
+
+    if any(e.is_mixed for e in elems):
+        return self.make_mixed_arg(elems)
+    else:
+        return self.make_arg(elems)
+
+
 @_as_wrapper_kernel_arg.register(kernel_args.CoordinatesKernelArg)
 def _as_wrapper_kernel_arg_coordinates(_, self):
     domain = self.mesh
@@ -812,58 +840,29 @@ def _as_wrapper_kernel_arg_cell_sizes(_, self):
     return self._make_dat_wrapper_kernel_arg(finat_element)
 
 
-@_as_wrapper_kernel_arg.register(kernel_args.OutputKernelArg)
-def _as_wrapper_kernel_arg_output(_, self):
-    arguments = self._expr.arguments()
-
-    # lower this
-    if len(arguments) == 0:
-        return op2.GlobalWrapperKernelArg((1,))
-
-    if self._diagonal:
-        test, trial = arguments
-        arguments = test,
-
-    function_spaces = self.get_function_spaces(arguments)
-    # need to drop real elements here since they correspond to global blocks
-    # (and the data structure loses a rank)
-    elems = [_ElementHandler(create_element(V.ufl_element()))
-             for V in function_spaces
-             if V.ufl_element().family() != "Real"]
-
-    if len(elems) == 0:
-        return op2.GlobalWrapperKernelArg((1,))
-
-    if any(e.is_mixed for e in elems):
-        return self.make_mixed_arg(elems)
-    else:
-        return self.make_arg(elems)
-
-
 @_as_wrapper_kernel_arg.register(kernel_args.ExteriorFacetKernelArg)
-def _(_, self):
+def _as_wrapper_kernel_arg_exterior_facet(_, self):
     return op2.DatWrapperKernelArg((1,))
 
 
 @_as_wrapper_kernel_arg.register(kernel_args.InteriorFacetKernelArg)
-def _(_, self):
+def _as_wrapper_kernel_arg_interior_facet(_, self):
     return op2.DatWrapperKernelArg((2,))
 
 
 @_as_wrapper_kernel_arg.register(CellFacetKernelArg)
-def _(_, self):
+def _as_wrapper_kernel_arg_cell_facet(_, self):
     # TODO Share this functionality with Slate kernel_builder.py
-    domain = self.mesh
-    if domain.extruded:
+    if self.mesh.extruded:
         # TODO This is not sufficiently stripped
-        num_facets = domain._base_mesh.ufl_cell().num_facets()
+        num_facets = self.mesh._base_mesh.ufl_cell().num_facets()
     else:
-        num_facets = domain.ufl_cell().num_facets()
+        num_facets = self.mesh.ufl_cell().num_facets()
     return op2.DatWrapperKernelArg((num_facets, 2))
 
 
 @_as_wrapper_kernel_arg.register(kernel_args.CellOrientationsKernelArg)
-def _(_, self):
+def _as_wrapper_kernel_arg_cell_orientations(_, self):
     # this is taken largely from mesh.py where we observe that the function space is
     # DG0.
     ufl_element = ufl.FiniteElement("DG", cell=self._expr.ufl_domain().ufl_cell(), degree=0)
