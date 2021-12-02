@@ -285,10 +285,36 @@ class _FormAssembler(abc.ABC):
         else:
             raise AssertionError
 
+    def assemble_inner(self, form, bcs):
+        tsfc_knls = self.compile_form(form)
+        all_integer_subdomain_ids = _get_all_integer_subdomain_ids(tsfc_knls)
+
+        knls = [_make_wrapper_kernel(form, tsfc_knl, all_integer_subdomain_ids,
+                                     diagonal=self.diagonal,
+                                     unroll=self.needs_unrolling(tsfc_knl, bcs))
+                for tsfc_knl in tsfc_knls]
+
+        for tknl, knl in zip(tsfc_knls, knls):
+            iterset = _get_iterset(form, tknl.kinfo, all_integer_subdomain_ids)
+            _execute_parloop(form, tknl, knl, iterset, tensor=self._tensor,
+                             diagonal=self.diagonal,
+                             lgmaps=self.collect_lgmaps(tknl, bcs))
+
+        for bc in bcs:
+            if isinstance(bc, EquationBC):
+                bc = bc.extract_form("F")
+            self._apply_bc(bc)
+
+    def needs_unrolling(self, knl, bcs):
+        return False
+
+    def collect_lgmaps(self, knl, bcs):
+        return None
+
 
 class _ZeroFormAssembler(_FormAssembler):
 
-    bcs = None
+    bcs = ()
     """Boundary conditions are not compatible with zero forms."""
 
     diagonal = False
@@ -305,18 +331,6 @@ class _ZeroFormAssembler(_FormAssembler):
     @property
     def result(self):
         return self._tensor.data[0]
-
-    def assemble_inner(self, form, bcs):
-        assert not bcs
-
-        tsfc_knls = self.compile_form()
-        all_integer_subdomain_ids = _get_all_integer_subdomain_ids(tsfc_knls)
-
-        knls = [_make_wrapper_kernel(form, k, all_integer_subdomain_ids) for k in tsfc_knls]
-
-        for tknl, knl in zip(tsfc_knls, knls):
-            iterset = _get_iterset(form, tknl.kinfo, all_integer_subdomain_ids)
-            _execute_parloop(form, tknl, knl, iterset, tensor=self._tensor)
 
 
 class _OneFormAssembler(_FormAssembler):
@@ -364,22 +378,6 @@ class _OneFormAssembler(_FormAssembler):
     @property
     def result(self):
         return self._tensor
-
-    def assemble_inner(self, form, bcs):
-        tsfc_knls = self.compile_form(form)
-        all_integer_subdomain_ids = _get_all_integer_subdomain_ids(tsfc_knls)
-
-        knls = [_make_wrapper_kernel(form, tsfc_knl, all_integer_subdomain_ids, diagonal=self._diagonal)
-                for tsfc_knl in tsfc_knls]
-
-        for tknl, knl in zip(tsfc_knls, knls):
-            iterset = _get_iterset(form, tknl.kinfo, all_integer_subdomain_ids)
-            _execute_parloop(form, tknl, knl, iterset, tensor=self._tensor, diagonal=self._diagonal)
-
-        for bc in bcs:
-            if isinstance(bc, EquationBC):
-                bc = bc.extract_form("F")
-            self._apply_bc(bc)
 
     def _apply_bc(self, bc):
         # TODO Maybe this could be a singledispatchmethod?
@@ -454,51 +452,111 @@ class _TwoFormAssembler(_FormAssembler):
             self._tensor.assemble()
         return self._tensor
 
-    def assemble_inner(self, expr, bcs):
-        if self._is_matfree:
-            return
+    def _needs_unrolling(self, all_bcs, Vrow, Vcol, i, j):
+        if len(Vrow) > 1:
+            bcrow = tuple(bc for bc in all_bcs
+                          if bc.function_space_index() == i)
+        else:
+            bcrow = all_bcs
+        if len(Vcol) > 1:
+            bccol = tuple(bc for bc in all_bcs
+                          if bc.function_space_index() == j
+                          and isinstance(bc, DirichletBC))
+        else:
+            bccol = tuple(bc for bc in all_bcs
+                          if isinstance(bc, DirichletBC))
+        return any(bc.function_space().component is not None
+                   for bc in itertools.chain(bcrow, bccol))
 
-        tsfc_knls = self.compile_form(expr)
-        all_integer_subdomain_ids = _get_all_integer_subdomain_ids(tsfc_knls)
+    def needs_unrolling(self, knl, bcs):
+        test, trial = self._form.arguments()
+        Vrow = test.function_space()
+        Vcol = trial.function_space()
+        row, col = knl.indices
+        if row is None and col is None:
+            unroll = zip(*(self._needs_unrolling(bcs, Vrow, Vcol, i, j)
+                                   for i, j in numpy.ndindex(self._tensor.block_shape)))
+            return any(unroll)
+        else:
+            assert row is not None and col is not None
+            return self._needs_unrolling(bcs, Vrow, Vcol, row, col)
 
-        knls = [_make_wrapper_kernel(expr, k, all_integer_subdomain_ids)
-                for k in tsfc_knls]
+    def collect_lgmaps(self, knl, bcs):
+        test, trial = self._form.arguments()
+        Vrow = test.function_space()
+        Vcol = trial.function_space()
+        row, col = knl.indices
+        if row is None and col is None:
+            return zip(*(self._collect_lgmaps(bcs, Vrow, Vcol, i, j)
+                                   for i, j in numpy.ndindex(self._tensor.block_shape)))
+        else:
+            assert row is not None and col is not None
+            return self._collect_lgmaps(bcs, Vrow, Vcol, row, col)
 
-        for tknl, knl in zip(tsfc_knls, knls):
-            indices, kinfo = tknl
+    def _collect_lgmaps(self, all_bcs, Vrow, Vcol, i, j):
+        if len(Vrow) > 1:
+            bcrow = tuple(bc for bc in all_bcs
+                          if bc.function_space_index() == i)
+        else:
+            bcrow = all_bcs
+        if len(Vcol) > 1:
+            bccol = tuple(bc for bc in all_bcs
+                          if bc.function_space_index() == j
+                          and isinstance(bc, DirichletBC))
+        else:
+            bccol = tuple(bc for bc in all_bcs
+                          if isinstance(bc, DirichletBC))
+        rlgmap, clgmap = self._tensor.M[i, j].local_to_global_maps
+        rlgmap = Vrow[i].local_to_global_map(bcrow, lgmap=rlgmap)
+        clgmap = Vcol[j].local_to_global_map(bccol, lgmap=clgmap)
+        return rlgmap, clgmap
 
-            iterset = _get_iterset(expr, kinfo, all_integer_subdomain_ids)
-
-            test, trial = expr.arguments()
-            Vrow = test.function_space()
-            Vcol = trial.function_space()
-            row, col = indices
-            if row is None and col is None:
-                lgmaps, unroll = zip(*(self._collect_lgmaps(self._tensor, bcs, Vrow, Vcol, i, j)
-                                       for i, j in numpy.ndindex(self._tensor.block_shape)))
-                unroll = any(unroll)
-            else:
-                assert row is not None and col is not None
-                lgmaps, unroll = self._collect_lgmaps(self._tensor, bcs, Vrow, Vcol, row, col)
-
-            # If we need to handle boundary conditions then replace the first argument to
-            # the wrapper kernel.
-            if unroll:
-                old_arg = knl.arguments[0]
-                if isinstance(old_arg, op2.MatWrapperKernelArg):
-                    new_arg = dataclasses.replace(old_arg, unroll=True)
-                elif isinstance(old_arg, op2.MixedMatWrapperKernelArg):
-                    new_arguments = tuple(dataclasses.replace(subarg, unroll=True)
-                                          for subarg in old_arg.arguments)
-                    new_arg = dataclasses.replace(old_arg, arguments=new_arguments)
-                else:
-                    raise AssertionError
-                knl = pyop2.wrapper_kernel.replace_argument(knl, old_arg, new_arg)
-
-            _execute_parloop(expr, tknl, knl, iterset, tensor=self._tensor, lgmaps=lgmaps)
-
-        for bc in bcs:
-            self._apply_bc(bc)
+    # def assemble_inner(self, expr, bcs):
+    #     raise NotImplementedError
+    #     if self._is_matfree:
+    #         return
+    #
+    #     # tsfc_knls = self.compile_form(expr)
+    #     # all_integer_subdomain_ids = _get_all_integer_subdomain_ids(tsfc_knls)
+    #     #
+    #     # knls = [_make_wrapper_kernel(expr, k, all_integer_subdomain_ids)
+    #     #         for k in tsfc_knls]
+    #     #
+    #     for tknl, knl in zip(tsfc_knls, knls):
+    #         indices, kinfo = tknl
+    #
+    #
+    #         test, trial = expr.arguments()
+    #         Vrow = test.function_space()
+    #         Vcol = trial.function_space()
+    #         row, col = indices
+    #         if row is None and col is None:
+    #             lgmaps, unroll = zip(*(self._collect_lgmaps(self._tensor, bcs, Vrow, Vcol, i, j)
+    #                                    for i, j in numpy.ndindex(self._tensor.block_shape)))
+    #             unroll = any(unroll)
+    #         else:
+    #             assert row is not None and col is not None
+    #             lgmaps, unroll = self._collect_lgmaps(self._tensor, bcs, Vrow, Vcol, row, col)
+    #
+    #         # If we need to handle boundary conditions then replace the first argument to
+    #         # the wrapper kernel.
+    #         if unroll:
+    #             old_arg = knl.arguments[0]
+    #             if isinstance(old_arg, op2.MatWrapperKernelArg):
+    #                 new_arg = dataclasses.replace(old_arg, unroll=True)
+    #             elif isinstance(old_arg, op2.MixedMatWrapperKernelArg):
+    #                 new_arguments = tuple(dataclasses.replace(subarg, unroll=True)
+    #                                       for subarg in old_arg.arguments)
+    #                 new_arg = dataclasses.replace(old_arg, arguments=new_arguments)
+    #             else:
+    #                 raise AssertionError
+    #             knl = pyop2.wrapper_kernel.replace_argument(knl, old_arg, new_arg)
+    #
+    #         # iterset = _get_iterset(expr, kinfo, all_integer_subdomain_ids)
+    #         # _execute_parloop(expr, tknl, knl, iterset, tensor=self._tensor, lgmaps=lgmaps)
+    #
+    #     for bc in bcs:
+    #         self._apply_bc(bc)
 
     def _apply_bc(self, bc):
         if isinstance(bc, DirichletBC):
@@ -563,41 +621,6 @@ class _TwoFormAssembler(_FormAssembler):
             raise ValueError(f"Invalid submatrix type, '{sub_mat_type}' (not 'aij' or 'baij')")
         return mat_type, sub_mat_type
 
-    @staticmethod
-    def _collect_lgmaps(matrix, all_bcs, Vrow, Vcol, row, col):
-        """Obtain local to global maps for matrix insertion in the
-        presence of boundary conditions.
-
-        :arg matrix: the matrix.
-        :arg all_bcs: all boundary conditions involved in the assembly of
-            the matrix.
-        :arg Vrow: function space for rows.
-        :arg Vcol: function space for columns.
-        :arg row: index into Vrow (by block).
-        :arg col: index into Vcol (by block).
-        :returns: 2-tuple ``(row_lgmap, col_lgmap), unroll``. unroll will
-           indicate to the codegeneration if the lgmaps need to be
-           unrolled from any blocking they contain.
-        """
-        if len(Vrow) > 1:
-            bcrow = tuple(bc for bc in all_bcs
-                          if bc.function_space_index() == row)
-        else:
-            bcrow = all_bcs
-        if len(Vcol) > 1:
-            bccol = tuple(bc for bc in all_bcs
-                          if bc.function_space_index() == col
-                          and isinstance(bc, DirichletBC))
-        else:
-            bccol = tuple(bc for bc in all_bcs
-                          if isinstance(bc, DirichletBC))
-        rlgmap, clgmap = matrix.M[row, col].local_to_global_maps
-        rlgmap = Vrow[row].local_to_global_map(bcrow, lgmap=rlgmap)
-        clgmap = Vcol[col].local_to_global_map(bccol, lgmap=clgmap)
-        unroll = any(bc.function_space().component is not None
-                     for bc in itertools.chain(bcrow, bccol))
-        return (rlgmap, clgmap), unroll
-
 
 def _assemble_form(form, tensor=None, bcs=None, *, assembly_type=AssemblyType.SOLUTION, diagonal=False, **kwargs):
     """Assemble a form.
@@ -635,7 +658,7 @@ def _assemble_form(form, tensor=None, bcs=None, *, assembly_type=AssemblyType.SO
 
 class _AssembleWrapperKernelBuilder:
 
-    def __init__(self, expr, split_knl, all_integer_subdomain_ids, *, diagonal=False):
+    def __init__(self, expr, split_knl, all_integer_subdomain_ids, *, diagonal=False, unroll=False):
         """TODO
 
         .. note::
@@ -645,6 +668,7 @@ class _AssembleWrapperKernelBuilder:
         self._expr = expr
         self._indices, self._kinfo = split_knl
         self._diagonal = diagonal
+        self._unroll = unroll
         self.all_integer_subdomain_ids = all_integer_subdomain_ids.get(self._kinfo.integral_type, None)
 
     def build(self):
@@ -775,7 +799,7 @@ class _AssembleWrapperKernelBuilder:
         rdim = (numpy.prod(rdim, dtype=int),)
         cdim = (numpy.prod(cdim, dtype=int),)
 
-        return op2.MatWrapperKernelArg(((rdim+cdim,),), (rmap_arg, cmap_arg))
+        return op2.MatWrapperKernelArg(((rdim+cdim,),), (rmap_arg, cmap_arg), unroll=self._unroll)
 
     @staticmethod
     def _get_map_id(finat_element):
