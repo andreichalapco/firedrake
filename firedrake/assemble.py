@@ -693,9 +693,13 @@ class _AssembleWrapperKernelBuilder:
         else:
             offset = None
 
-        handler = _ElementHandler(finat_element)
-        dim = handler.tensor_shape
-        arity = handler.node_shape
+        if isinstance(finat_element, finat.TensorFiniteElement):
+            dim = finat_element._shape
+            arity = numpy.prod(finat_element.index_shape[:-len(dim)], dtype=int)
+        else:
+            dim = (1,)
+            arity = numpy.prod(finat_element.index_shape, dtype=int)
+
         if self.integral_type in {"interior_facet", "interior_facet_vert"}:
             arity *= 2
 
@@ -718,18 +722,18 @@ class _AssembleWrapperKernelBuilder:
             func = self._make_mat_wrapper_kernel_arg
         else:
             raise AssertionError
-        return func(*[e._elem for e in elements])
+        return func(*[e for e in elements])
 
     def make_mixed_arg(self, elements):
         subargs = []
-        for splitstuff in itertools.product(*[e.split() for e in elements]):
+        for splitstuff in itertools.product(*[e.elements for e in elements]):
             subargs.append(self.make_arg(splitstuff))
 
         if len(elements) == 1:
             return op2.MixedDatWrapperKernelArg(tuple(subargs))
         elif len(elements) == 2:
             e1, e2 = elements
-            shape = len(e1.split()), len(e2.split())
+            shape = len(e1.elements), len(e2.elements)
             return op2.MixedMatWrapperKernelArg(tuple(subargs), shape)
         else:
             raise AssertionError
@@ -789,14 +793,14 @@ def _as_wrapper_kernel_arg_output(_, self):
     function_spaces = self.get_function_spaces(arguments)
     # need to drop real elements here since they correspond to global blocks
     # (and the data structure loses a rank)
-    elems = [_ElementHandler(create_element(V.ufl_element()))
+    elems = [create_element(V.ufl_element())
              for V in function_spaces
              if V.ufl_element().family() != "Real"]
 
     if len(elems) == 0:
         return op2.GlobalWrapperKernelArg((1,))
 
-    if any(e.is_mixed for e in elems):
+    if any(isinstance(e, finat.EnrichedElement) and e.is_mixed for e in elems):
         return self.make_mixed_arg(elems)
     else:
         return self.make_arg(elems)
@@ -866,40 +870,6 @@ def _as_wrapper_kernel_arg_cell_orientations(_, self):
 @_as_wrapper_kernel_arg.register(LayerCountKernelArg)
 def _as_wrapper_kernel_arg_layer_count(_, self):
     return op2.GlobalWrapperKernelArg((1,))
-
-
-class _ElementHandler:
-
-    def __init__(self, elem):
-        self._elem = elem
-
-    @property
-    def node_shape(self):
-        if self._is_tensor_element:
-            shape = self._elem.index_shape[:-len(self.tensor_shape)]
-        else:
-            shape = self._elem.index_shape
-
-        shape = numpy.prod(shape, dtype=int)
-        return shape
-
-    @property
-    def tensor_shape(self):
-        return self._elem._shape if self._is_tensor_element else (1,)
-
-    @property
-    def is_mixed(self):
-        return isinstance(self._elem, finat.EnrichedElement) and self._elem.is_mixed
-
-    def split(self):
-        if not self.is_mixed:
-            raise ValueError("Cannot split a non-mixed element")
-
-        return tuple([type(self)(subelem.element) for subelem in self._elem.elements])
-
-    @property
-    def _is_tensor_element(self):
-        return isinstance(self._elem, finat.TensorFiniteElement)
 
 
 def _wrapper_kernel_cache_key(form, split_knl, all_integer_subdomain_ids, **kwargs):
