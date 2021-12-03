@@ -464,7 +464,7 @@ class _TwoFormAssembler(_FormAssembler):
                                    for i, j in numpy.ndindex(self._tensor.block_shape))
         else:
             assert row is not None and col is not None
-            return self._collect_lgmaps(bcs, Vrow, Vcol, row, col)
+            return (self._collect_lgmaps(bcs, Vrow, Vcol, row, col),)
 
     def _collect_lgmaps(self, all_bcs, Vrow, Vcol, i, j):
         if len(Vrow) > 1:
@@ -1024,7 +1024,6 @@ class ParloopExecutor:
         else:
             return op2.DatParloopArg(dat, self._get_map(V))
 
-
     def rank2stuff(self, tensor, Vrow, Vcol):
         if Vrow.ufl_element().family() == "Real":
             if Vcol.ufl_element().family() == "Real":
@@ -1039,9 +1038,7 @@ class ParloopExecutor:
             else:
                 rmap = self._get_map(Vrow)
                 cmap = self._get_map(Vcol)
-                return op2.MatParloopArg(tensor, (rmap, cmap), lgmaps=(self._lgmaps,))
-
-
+                return op2.MatParloopArg(tensor, (rmap, cmap), lgmaps=self._lgmaps)
 
 
 # TODO Make into a singledispatchmethod when we have Python 3.8
@@ -1085,7 +1082,7 @@ def _as_parloop_arg_output(_, self):
 
         if len(arguments) == 1:
             V, = func_spaces
-            return self.rank1stuff(self._tensor, V)
+            return self.rank1stuff(self._tensor.dat, V)
         elif len(arguments) == 2:
             return self.rank2stuff(self._tensor.M, *func_spaces)
         else:
