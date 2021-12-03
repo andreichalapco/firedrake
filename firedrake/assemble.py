@@ -422,55 +422,52 @@ class _TwoFormAssembler(_FormAssembler):
         return self._bcs
 
     @property
+    def test_function_space(self):
+        test, _ = self._form.arguments()
+        return test.function_space()
+
+    @property
+    def trial_function_space(self):
+        _, trial = self._form.arguments()
+        return trial.function_space()
+
+    def get_indicess(self, knl):
+        if all(i is None for i in knl.indices):
+            return numpy.ndindex(self._tensor.block_shape)
+        else:
+            assert all(i is not None for i in knl.indices)
+            return knl.indices,
+
+    @property
     def result(self):
         self._tensor.M.assemble()
         return self._tensor
 
     def needs_unrolling(self, knl, bcs):
-        if all(i is None for i in knl.indices):
-            indicess = numpy.ndindex(self._tensor.block_shape)
-        else:
-            assert all(i is not None for i in knl.indices)
-            indicess = knl.indices,
-
-        for i, j in indicess:
+        for i, j in self.get_indicess(knl):
             for bc in itertools.chain(*self._filter_bcs(bcs, i, j)):
                 if bc.function_space().component is not None:
                     return True
         return False
 
     def collect_lgmaps(self, knl, bcs):
-        if all(i is None for i in knl.indices):
-            indicess = numpy.ndindex(self._tensor.block_shape)
-        else:
-            assert all(i is not None for i in knl.indices)
-            indicess = knl.indices,
-
-        test, trial = self._form.arguments()
-        row_V = test.ufl_function_space()
-        col_V = trial.ufl_function_space()
-
         lgmaps = []
-        for i, j in indicess:
+        for i, j in self.get_indicess(knl):
             row_bcs, col_bcs = self._filter_bcs(bcs, i, j)
             rlgmap, clgmap = self._tensor.M[i, j].local_to_global_maps
-            rlgmap = row_V[i].local_to_global_map(row_bcs, lgmap=rlgmap)
-            clgmap = col_V[j].local_to_global_map(col_bcs, lgmap=clgmap)
+            rlgmap = self.test_function_space[i].local_to_global_map(row_bcs, rlgmap)
+            clgmap = self.trial_function_space[j].local_to_global_map(col_bcs, clgmap)
             lgmaps.append((rlgmap, clgmap))
         return tuple(lgmaps)
 
     def _filter_bcs(self, bcs, row, col):
-        test, trial = self._form.arguments()
-        row_V = test.ufl_function_space()
-        col_V = trial.ufl_function_space()
-
-        if len(row_V) > 1:
+        if len(self.test_function_space) > 1:
             bcrow = tuple(bc for bc in bcs
                           if bc.function_space_index() == row)
         else:
             bcrow = bcs
 
-        if len(col_V) > 1:
+        if len(self.trial_function_space) > 1:
             bccol = tuple(bc for bc in bcs
                           if bc.function_space_index() == col
                           and isinstance(bc, DirichletBC))
