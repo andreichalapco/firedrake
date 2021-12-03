@@ -627,6 +627,14 @@ class _AssembleWrapperKernelBuilder:
 
         self.integral_type = self._kinfo.integral_type
 
+        def coeffs():
+            coeffs = self._form.coefficients()
+            for idx, subidxs in self._kinfo.coefficient_map:
+                for subidx in subidxs:
+                    yield coeffs[idx].split()[subidx]
+
+        self.coeffs_iterator = iter(coeffs())
+
         wrapper_kernel_args = [
             self._as_wrapper_kernel_arg(arg)
             for arg in self._kinfo.tsfc_kernel_args
@@ -654,14 +662,10 @@ class _AssembleWrapperKernelBuilder:
     def mesh(self):
         return self._form.ufl_domains()[self._kinfo.domain_number]
 
-    @functools.cached_property
-    def active_coefficients(self):
-        coeffs = self._form.coefficients()
-        active_coeffs = []
-        for idx, subidxs in self._kinfo.coefficient_map:
-            for subidx in subidxs:
-                active_coeffs.append(coeffs[idx].split()[subidx])
-        return tuple(active_coeffs)
+    # def active_coefficients(self):
+    #     try:
+    #     except StopIteration:
+    #         raise AssertionError
 
     def subset(self):
         # Assume that if subdomain_data is not None then we are dealing with
@@ -726,7 +730,8 @@ class _AssembleWrapperKernelBuilder:
 
     def make_mixed_arg(self, elements):
         subargs = []
-        for splitstuff in itertools.product(*[e.elements for e in elements]):
+        subelements = lambda el: [e.element for e in el.elements]
+        for splitstuff in itertools.product(*[subelements(e) for e in elements]):
             subargs.append(self.make_arg(splitstuff))
 
         if len(elements) == 1:
@@ -737,9 +742,6 @@ class _AssembleWrapperKernelBuilder:
             return op2.MixedMatWrapperKernelArg(tuple(subargs), shape)
         else:
             raise AssertionError
-
-    def get_coeff(self, number):
-        return self.active_coefficients[number]
 
     def _make_dat_wrapper_kernel_arg(self, finat_element):
         dim, map_arg = self.get_dim_and_map(finat_element)
@@ -817,16 +819,18 @@ def _as_wrapper_kernel_arg_coordinates(_, self):
 
 
 @_as_wrapper_kernel_arg.register(kernel_args.ConstantKernelArg)
-def _as_wrapper_kernel_arg_constant(arg, self):
-    coeff = self.active_coefficients[arg.number]
+def _as_wrapper_kernel_arg_constant(_, self):
+    # coeff = next(self.active_coefficients())
+    coeff = next(self.coeffs_iterator)
     ufl_element = coeff.ufl_function_space().ufl_element()
     assert ufl_element.family() == "Real"
     return op2.GlobalWrapperKernelArg((ufl_element.value_size(),))
 
 
 @_as_wrapper_kernel_arg.register(kernel_args.CoefficientKernelArg)
-def _as_wrapper_kernel_arg_coefficient(arg, self):
-    coeff = self.active_coefficients[arg.number]
+def _as_wrapper_kernel_arg_coefficient(_, self):
+    # coeff = next(self.active_coefficients())
+    coeff = next(self.coeffs_iterator)
     finat_element = create_element(coeff.ufl_function_space().ufl_element())
     return self._make_dat_wrapper_kernel_arg(finat_element)
 
@@ -926,11 +930,16 @@ class ParloopExecutor:
 
         self._iterset = self._get_iterset()
 
-    def get_coeff(self, number):
-        return self.active_coefficients[number]
-
     def run(self):
         kinfo = self._split_knl.kinfo
+
+        def coeffs():
+            coeffs = self._form.coefficients()
+            for idx, subidxs in self._kinfo.coefficient_map:
+                for subidx in subidxs:
+                    yield coeffs[idx].split()[subidx]
+
+        self.coeffs_iterator = iter(coeffs())
 
         parloop_args = [
             _as_parloop_arg(tsfc_arg, self)
@@ -942,14 +951,15 @@ class ParloopExecutor:
             raise RuntimeError("Integral measure does not match measure of all "
                                "coefficients/arguments")
 
-    @functools.cached_property
-    def active_coefficients(self):
-        coeffs = self._form.coefficients()
-        active_coeffs = []
-        for idx, subidxs in self._kinfo.coefficient_map:
-            for subidx in subidxs:
-                active_coeffs.append(coeffs[idx].split()[subidx])
-        return tuple(active_coeffs)
+    # @property
+    # def active_coefficients(self):
+    #     try:
+    #         coeffs = self._form.coefficients()
+    #         for idx, subidxs in self._kinfo.coefficient_map:
+    #             for subidx in subidxs:
+    #                 yield coeffs[idx].split()[subidx]
+    #     except StopIteration:
+    #         raise AssertionError
 
     @functools.cached_property
     def mesh(self):
@@ -1066,14 +1076,16 @@ def _as_parloop_arg_coordinates(_, self):
 
 
 @_as_parloop_arg.register(kernel_args.ConstantKernelArg)
-def _as_parloop_arg_constant(arg, self):
-    coeff = self.active_coefficients[arg.number]
+def _as_parloop_arg_constant(_, self):
+    # coeff = next(self.active_coefficients)
+    coeff = next(self.coeffs_iterator)
     return op2.GlobalParloopArg(coeff.dat)
 
 
 @_as_parloop_arg.register(kernel_args.CoefficientKernelArg)
 def _as_parloop_arg_coefficient(arg, self):
-    coeff = self.active_coefficients[arg.number]
+    # coeff = next(self.active_coefficients)
+    coeff = next(self.coeffs_iterator)
     mp = self._get_map(coeff.function_space())
     return op2.DatParloopArg(coeff.dat, mp)
 

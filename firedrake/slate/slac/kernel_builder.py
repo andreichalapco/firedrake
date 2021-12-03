@@ -705,7 +705,6 @@ class LocalLoopyKernelBuilder(object):
         import tsfc
 
         coords_el = tsfc.finatinterface.create_element(coords.ufl_element())
-        isreal = coords.ufl_element().family() == "Real"
         args = [kernel_args.CoordinatesKernelArg((coords_el.index_shape,), dtype=self.tsfc_parameters["scalar_type"])]
 
         if self.bag.needs_cell_orientations:
@@ -715,31 +714,32 @@ class LocalLoopyKernelBuilder(object):
         if self.bag.needs_cell_sizes:
             myelem = self.expression.ufl_domain().cell_sizes.ufl_element()
             finat_element = create_element(myelem)
-            isreal = myelem.family() == "Real"
             args.append(kernel_args.CellSizesKernelArg(
                         (finat_element.index_shape,), dtype=self.tsfc_parameters["scalar_type"]))
 
+        ctr = count()
         for coeff, val in self.bag.coefficients.items():
             if isinstance(val, OrderedDict):
                 for sub_coeff, name in val.items():
                     ufl_element = sub_coeff.ufl_element()
                     finat_element = create_element(ufl_element)
-                    isreal = ufl_element.family() == "Real"
+                    coeff_number = next(ctr)
                     arg = kernel_args.CoefficientKernelArg(
-                        name, (finat_element.index_shape,), dtype=self.tsfc_parameters["scalar_type"]
+                        name, coeff_number, (finat_element.index_shape,), dtype=self.tsfc_parameters["scalar_type"]
                     )
                     args.append(arg)
             else:
                 name = val
+                coeff_number = next(ctr)
                 if coeff.ufl_element().family() == "Real":
                     shape = self.extent(coeff)
                     arg = kernel_args.ConstantKernelArg(
-                        name, shape, self.tsfc_parameters["scalar_type"]
+                        name, coeff_number, shape, self.tsfc_parameters["scalar_type"]
                     )
                 else:
                     finat_element = create_element(coeff.ufl_element())
                     arg = kernel_args.CoefficientKernelArg(
-                        name, (finat_element.index_shape,), dtype=self.tsfc_parameters["scalar_type"]
+                        name, coeff_number, (finat_element.index_shape,), dtype=self.tsfc_parameters["scalar_type"]
                     )
                 args.append(arg)
 
