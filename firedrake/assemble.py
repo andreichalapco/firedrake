@@ -426,63 +426,59 @@ class _TwoFormAssembler(_FormAssembler):
         self._tensor.M.assemble()
         return self._tensor
 
-    def _needs_unrolling(self, all_bcs, Vrow, Vcol, i, j):
-        if len(Vrow) > 1:
-            bcrow = tuple(bc for bc in all_bcs
-                          if bc.function_space_index() == i)
-        else:
-            bcrow = all_bcs
-        if len(Vcol) > 1:
-            bccol = tuple(bc for bc in all_bcs
-                          if bc.function_space_index() == j
-                          and isinstance(bc, DirichletBC))
-        else:
-            bccol = tuple(bc for bc in all_bcs
-                          if isinstance(bc, DirichletBC))
-        return any(bc.function_space().component is not None
-                   for bc in itertools.chain(bcrow, bccol))
-
     def needs_unrolling(self, knl, bcs):
-        test, trial = self._form.arguments()
-        Vrow = test.function_space()
-        Vcol = trial.function_space()
-        row, col = knl.indices
-        if row is None and col is None:
-            return any(self._needs_unrolling(bcs, Vrow, Vcol, i, j)
-                                   for i, j in numpy.ndindex(self._tensor.block_shape))
+        if all(i is None for i in knl.indices):
+            indicess = numpy.ndindex(self._tensor.block_shape)
         else:
-            assert row is not None and col is not None
-            return self._needs_unrolling(bcs, Vrow, Vcol, row, col)
+            assert all(i is not None for i in knl.indices)
+            indicess = knl.indices,
+
+        for i, j in indicess:
+            for bc in itertools.chain(*self._filter_bcs(bcs, i, j)):
+                if bc.function_space().component is not None:
+                    return True
+        return False
 
     def collect_lgmaps(self, knl, bcs):
-        test, trial = self._form.arguments()
-        Vrow = test.function_space()
-        Vcol = trial.function_space()
-        row, col = knl.indices
-        if row is None and col is None:
-            return tuple(self._collect_lgmaps(bcs, Vrow, Vcol, i, j)
-                                   for i, j in numpy.ndindex(self._tensor.block_shape))
+        if all(i is None for i in knl.indices):
+            indicess = numpy.ndindex(self._tensor.block_shape)
         else:
-            assert row is not None and col is not None
-            return (self._collect_lgmaps(bcs, Vrow, Vcol, row, col),)
+            assert all(i is not None for i in knl.indices)
+            indicess = knl.indices,
 
-    def _collect_lgmaps(self, all_bcs, Vrow, Vcol, i, j):
-        if len(Vrow) > 1:
-            bcrow = tuple(bc for bc in all_bcs
-                          if bc.function_space_index() == i)
+        test, trial = self._form.arguments()
+        row_V = test.ufl_function_space()
+        col_V = trial.ufl_function_space()
+
+        lgmaps = []
+        for i, j in indicess:
+            row_bcs, col_bcs = self._filter_bcs(bcs, i, j)
+            rlgmap, clgmap = self._tensor.M[i, j].local_to_global_maps
+            rlgmap = row_V[i].local_to_global_map(row_bcs, lgmap=rlgmap)
+            clgmap = col_V[j].local_to_global_map(col_bcs, lgmap=clgmap)
+            lgmaps.append((rlgmap, clgmap))
+        return tuple(lgmaps)
+
+    def _filter_bcs(self, bcs, row, col):
+        test, trial = self._form.arguments()
+        row_V = test.ufl_function_space()
+        col_V = trial.ufl_function_space()
+
+        if len(row_V) > 1:
+            bcrow = tuple(bc for bc in bcs
+                          if bc.function_space_index() == row)
         else:
-            bcrow = all_bcs
-        if len(Vcol) > 1:
-            bccol = tuple(bc for bc in all_bcs
-                          if bc.function_space_index() == j
+            bcrow = bcs
+
+        if len(col_V) > 1:
+            bccol = tuple(bc for bc in bcs
+                          if bc.function_space_index() == col
                           and isinstance(bc, DirichletBC))
         else:
-            bccol = tuple(bc for bc in all_bcs
-                          if isinstance(bc, DirichletBC))
-        rlgmap, clgmap = self._tensor.M[i, j].local_to_global_maps
-        rlgmap = Vrow[i].local_to_global_map(bcrow, lgmap=rlgmap)
-        clgmap = Vcol[j].local_to_global_map(bccol, lgmap=clgmap)
-        return rlgmap, clgmap
+            bccol = tuple(bc for bc in bcs if isinstance(bc, DirichletBC))
+
+        return bcrow, bccol
+        
 
     def _apply_bc(self, bc):
         if isinstance(bc, DirichletBC):
