@@ -14,7 +14,6 @@ from os import path, environ, getuid, makedirs
 import os
 import gzip, zlib
 import tempfile
-import collections
 
 import ufl
 from ufl import Form, conj
@@ -23,12 +22,12 @@ from firedrake.function import Function
 from .ufl_expr import TestFunction
 
 from tsfc import compile_form as tsfc_compile_form
+from tsfc import kernel_args
 from tsfc.parameters import PARAMETERS as tsfc_default_parameters
 
-from pyop2.caching import Cached
-from pyop2.mpi import COMM_WORLD, MPI
+from pyop2 import op2
 
-from firedrake import pyop2_interface, utils
+from firedrake import utils
 from firedrake.formmanipulation import split_form
 from firedrake.parameters import parameters as default_parameters
 from firedrake.petsc import PETSc
@@ -180,7 +179,7 @@ def make_tsfc_kernel(form, name, parameters, number_map, interface, coffee=False
             opts = default_parameters["coffee"].copy()
             # Unwind coefficient numbering
             numbers = tuple(number_map[c] for c in kernel.coefficient_numbers)
-            pyop2_kernel = pyop2_interface.as_pyop2_local_kernel(
+            pyop2_kernel = as_pyop2_local_kernel(
                 kernel.ast, kernel.name, kernel.arguments, flop_count=kernel.flop_count, opts=opts
             )
             arguments = tuple(kernel.arguments) if kernel.arguments is not None else None
@@ -330,3 +329,13 @@ def gather_integer_subdomain_ids(knls):
     for k, v in all_integer_subdomain_ids.items():
         all_integer_subdomain_ids[k] = tuple(sorted(v))
     return all_integer_subdomain_ids
+
+
+def as_pyop2_local_kernel(ast, name, arguments, access=op2.INC, **kwargs):
+    """TODO"""
+    access_map = {kernel_args.Intent.IN: op2.READ,
+                  kernel_args.Intent.OUT: access}
+    knl_args = [op2.LocalKernelArg(access_map[arg.intent], arg.dtype)
+                for arg in arguments if arg.intent is not None]
+    return op2.Kernel(ast, name, knl_args,
+                      requires_zeroed_output_arguments=True, **kwargs)

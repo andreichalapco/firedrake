@@ -475,7 +475,6 @@ class _TwoFormAssembler(_FormAssembler):
             bccol = tuple(bc for bc in bcs if isinstance(bc, DirichletBC))
 
         return bcrow, bccol
-        
 
     def _apply_bc(self, bc):
         if isinstance(bc, DirichletBC):
@@ -614,70 +613,54 @@ class _AssembleWrapperKernelBuilder:
         self._indices, self._kinfo = split_knl
         self._diagonal = diagonal
         self._unroll = unroll
-        self.all_integer_subdomain_ids = all_integer_subdomain_ids.get(self._kinfo.integral_type, None)
+        self._all_integer_subdomain_ids = all_integer_subdomain_ids.get(self._kinfo.integral_type, None)
 
     def build(self):
-        domain = self.mesh
-        extruded = domain.extruded
-        constant_layers = extruded and not domain.variable_layers
+        wrapper_kernel_args = [self._as_wrapper_kernel_arg(arg)
+                               for arg in self._kinfo.tsfc_kernel_args
+                               if arg.intent is not None]
 
-        subset = self.subset()
+        iteration_regions = {"exterior_facet_top": op2.ON_TOP,
+                             "exterior_facet_bottom": op2.ON_BOTTOM,
+                             "interior_facet_horiz": op2.ON_INTERIOR_FACETS}
+        iteration_region = iteration_regions.get(self._integral_type, None)
 
-        self.extruded = extruded
+        return op2.WrapperKernel(self._kinfo.kernel,
+                                 wrapper_kernel_args,
+                                 iteration_region=iteration_region,
+                                 pass_layer_arg=self._kinfo.pass_layer_arg,
+                                 extruded=self.mesh.extruded,
+                                 constant_layers=not self.mesh.variable_layers,
+                                 subset=self._needs_subset)
 
-        self.integral_type = self._kinfo.integral_type
-
-        def coeffs():
-            coeffs = self._form.coefficients()
-            for idx, subidxs in self._kinfo.coefficient_map:
-                for subidx in subidxs:
-                    yield coeffs[idx].split()[subidx]
-
-        self.coeffs_iterator = iter(coeffs())
-
-        wrapper_kernel_args = [
-            self._as_wrapper_kernel_arg(arg)
-            for arg in self._kinfo.tsfc_kernel_args
-            if arg.intent is not None
-        ]
-
-        iteration_region = {
-            "exterior_facet_top": op2.ON_TOP,
-            "exterior_facet_bottom": op2.ON_BOTTOM,
-            "interior_facet_horiz": op2.ON_INTERIOR_FACETS
-        }.get(self._kinfo.integral_type, None)
-
-        return op2.WrapperKernel(
-            self._kinfo.kernel,
-            wrapper_kernel_args,
-            iteration_region=iteration_region,
-            pass_layer_arg=self._kinfo.pass_layer_arg,
-            extruded=extruded,
-            constant_layers=constant_layers,
-            subset=subset
-        )
+    @property
+    def _integral_type(self):
+        return self._kinfo.integral_type
 
     # TODO I copy this for parloops too
     @functools.cached_property
     def mesh(self):
         return self._form.ufl_domains()[self._kinfo.domain_number]
 
-    # def active_coefficients(self):
-    #     try:
-    #     except StopIteration:
-    #         raise AssertionError
+    @functools.cached_property
+    def _active_coefficients(self):
+        coeffs = self._form.coefficients()
+        active_coeffs = []
+        for idx, subidxs in self._kinfo.coefficient_map:
+            for subidx in subidxs:
+                active_coeffs.append(coeffs[idx].split()[subidx])
+        return tuple(active_coeffs)
 
-    def subset(self):
-        # Assume that if subdomain_data is not None then we are dealing with
-        # a subset. This is potentially a bit dodgy.
-        subdomain_data = self._form.subdomain_data()[self.mesh].get(self._kinfo.integral_type, None)
-        if subdomain_data is not None:
+    @functools.cached_property
+    def _needs_subset(self):
+        subdomain_data = self._form.subdomain_data()[self.mesh]
+        if subdomain_data.get(self._integral_type, None) is not None:
             return True
 
         if self._kinfo.subdomain_id == "everywhere":
             return False
         elif self._kinfo.subdomain_id == "otherwise":
-            return self.all_integer_subdomain_ids is not None
+            return self._all_integer_subdomain_ids is not None
         else:
             return True
 
@@ -689,10 +672,10 @@ class _AssembleWrapperKernelBuilder:
         map_id = self._get_map_id(finat_element)
 
         # offset only valid for extruded
-        if self.extruded:
+        if self.mesh.extruded:
             offset = tuple(eutils.calculate_dof_offset(finat_element))
             # For interior facet integrals we double the size of the offset array
-            if self.integral_type in {"interior_facet", "interior_facet_vert"}:
+            if self._integral_type in {"interior_facet", "interior_facet_vert"}:
                 offset += offset
         else:
             offset = None
@@ -704,7 +687,7 @@ class _AssembleWrapperKernelBuilder:
             dim = (1,)
             arity = numpy.prod(finat_element.index_shape, dtype=int)
 
-        if self.integral_type in {"interior_facet", "interior_facet_vert"}:
+        if self._integral_type in {"interior_facet", "interior_facet_vert"}:
             arity *= 2
 
         map_arg = op2.MapWrapperKernelArg(map_id, arity, offset)
@@ -763,19 +746,16 @@ class _AssembleWrapperKernelBuilder:
 
         functionspacedata.py does the same thing.
         """
-        # TODO need to look at measure...
-        # functionspacedata does some magic and replaces tensorelements with base
         if isinstance(finat_element, finat.TensorFiniteElement):
             finat_element = finat_element.base_element
 
         real_tensorproduct = eutils.is_real_tensor_product_element(finat_element)
 
-        entity_dofs = finat_element.entity_dofs()
         try:
             eperm_key = entity_permutations_key(finat_element.entity_permutations)
         except NotImplementedError:
             eperm_key = None
-        return entity_dofs_key(entity_dofs), real_tensorproduct, eperm_key
+        return entity_dofs_key(finat_element.entity_dofs()), real_tensorproduct, eperm_key
 
 
 @functools.singledispatch
@@ -819,18 +799,16 @@ def _as_wrapper_kernel_arg_coordinates(_, self):
 
 
 @_as_wrapper_kernel_arg.register(kernel_args.ConstantKernelArg)
-def _as_wrapper_kernel_arg_constant(_, self):
-    # coeff = next(self.active_coefficients())
-    coeff = next(self.coeffs_iterator)
+def _as_wrapper_kernel_arg_constant(arg, self):
+    coeff = self._active_coefficients[arg.number]
     ufl_element = coeff.ufl_function_space().ufl_element()
     assert ufl_element.family() == "Real"
     return op2.GlobalWrapperKernelArg((ufl_element.value_size(),))
 
 
 @_as_wrapper_kernel_arg.register(kernel_args.CoefficientKernelArg)
-def _as_wrapper_kernel_arg_coefficient(_, self):
-    # coeff = next(self.active_coefficients())
-    coeff = next(self.coeffs_iterator)
+def _as_wrapper_kernel_arg_coefficient(arg, self):
+    coeff = self._active_coefficients[arg.number]
     finat_element = create_element(coeff.ufl_function_space().ufl_element())
     return self._make_dat_wrapper_kernel_arg(finat_element)
 
@@ -933,14 +911,6 @@ class ParloopExecutor:
     def run(self):
         kinfo = self._split_knl.kinfo
 
-        def coeffs():
-            coeffs = self._form.coefficients()
-            for idx, subidxs in self._kinfo.coefficient_map:
-                for subidx in subidxs:
-                    yield coeffs[idx].split()[subidx]
-
-        self.coeffs_iterator = iter(coeffs())
-
         parloop_args = [
             _as_parloop_arg(tsfc_arg, self)
             for tsfc_arg in self._split_knl.kinfo.tsfc_kernel_args if tsfc_arg.intent is not None
@@ -951,35 +921,34 @@ class ParloopExecutor:
             raise RuntimeError("Integral measure does not match measure of all "
                                "coefficients/arguments")
 
-    # @property
-    # def active_coefficients(self):
-    #     try:
-    #         coeffs = self._form.coefficients()
-    #         for idx, subidxs in self._kinfo.coefficient_map:
-    #             for subidx in subidxs:
-    #                 yield coeffs[idx].split()[subidx]
-    #     except StopIteration:
-    #         raise AssertionError
+    @functools.cached_property
+    def _active_coefficients(self):
+        coeffs = self._form.coefficients()
+        active_coeffs = []
+        for idx, subidxs in self._kinfo.coefficient_map:
+            for subidx in subidxs:
+                active_coeffs.append(coeffs[idx].split()[subidx])
+        return tuple(active_coeffs)
 
     @functools.cached_property
     def mesh(self):
         return self._form.ufl_domains()[self._kinfo.domain_number]
 
     @property
-    def integral_type(self):
+    def _integral_type(self):
         return self._kinfo.integral_type
 
     def _get_map(self, V):
         """TODO"""
         assert isinstance(V, ufl.FunctionSpace)
 
-        if self.integral_type in {"cell", "exterior_facet_top",
+        if self._integral_type in {"cell", "exterior_facet_top",
                                   "exterior_facet_bottom",
                                   "interior_facet_horiz"}:
             return V.cell_node_map()
-        elif self.integral_type in {"exterior_facet", "exterior_facet_vert"}:
+        elif self._integral_type in {"exterior_facet", "exterior_facet_vert"}:
             return V.exterior_facet_node_map()
-        elif self.integral_type in {"interior_facet", "interior_facet_vert"}:
+        elif self._integral_type in {"interior_facet", "interior_facet_vert"}:
             return V.interior_facet_node_map()
         else:
             raise AssertionError
@@ -1076,16 +1045,14 @@ def _as_parloop_arg_coordinates(_, self):
 
 
 @_as_parloop_arg.register(kernel_args.ConstantKernelArg)
-def _as_parloop_arg_constant(_, self):
-    # coeff = next(self.active_coefficients)
-    coeff = next(self.coeffs_iterator)
+def _as_parloop_arg_constant(arg, self):
+    coeff = self._active_coefficients[arg.number]
     return op2.GlobalParloopArg(coeff.dat)
 
 
 @_as_parloop_arg.register(kernel_args.CoefficientKernelArg)
 def _as_parloop_arg_coefficient(arg, self):
-    # coeff = next(self.active_coefficients)
-    coeff = next(self.coeffs_iterator)
+    coeff = self._active_coefficients[arg.number]
     mp = self._get_map(coeff.function_space())
     return op2.DatParloopArg(coeff.dat, mp)
 
