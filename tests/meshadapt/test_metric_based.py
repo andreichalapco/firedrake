@@ -68,6 +68,7 @@ def test_normalisation(dim):
         assert np.allclose(metric_vec.array, v.array)
 
 
+@pytest.mark.parallel(nprocs=2)
 def test_intersection(dim):
     """
     Test that intersecting two metrics gives
@@ -78,8 +79,9 @@ def test_intersection(dim):
     metric2 = UniformRiemannianMetric(mesh, 25.0)
     metric1.intersect(metric2)
     expected = UniformRiemannianMetric(mesh, 100.0)
-    with expected.dat.vec_ro as v:
-        assert np.allclose(metric1.vec.array, v.array)
+    metric1._vec.axpy(-1, expected.vec)
+    norm = metric1._vec.norm()
+    assert np.isclose(norm, 0.0)
 
 
 def test_preserve_cell_tags():
