@@ -644,12 +644,7 @@ class _AssembleWrapperKernelBuilder:
 
     @functools.cached_property
     def _active_coefficients(self):
-        coeffs = self._form.coefficients()
-        active_coeffs = []
-        for idx, subidxs in self._kinfo.coefficient_map:
-            for subidx in subidxs:
-                active_coeffs.append(coeffs[idx].split()[subidx])
-        return tuple(active_coeffs)
+        return iter_active_coefficients(self._form, self._kinfo)
 
     @functools.cached_property
     def _needs_subset(self):
@@ -800,7 +795,7 @@ def _as_wrapper_kernel_arg_coordinates(_, self):
 
 @_as_wrapper_kernel_arg.register(kernel_args.ConstantKernelArg)
 def _as_wrapper_kernel_arg_constant(arg, self):
-    coeff = self._active_coefficients[arg.number]
+    coeff = next(self._active_coefficients)
     ufl_element = coeff.ufl_function_space().ufl_element()
     assert ufl_element.family() == "Real"
     return op2.GlobalWrapperKernelArg((ufl_element.value_size(),))
@@ -808,7 +803,7 @@ def _as_wrapper_kernel_arg_constant(arg, self):
 
 @_as_wrapper_kernel_arg.register(kernel_args.CoefficientKernelArg)
 def _as_wrapper_kernel_arg_coefficient(arg, self):
-    coeff = self._active_coefficients[arg.number]
+    coeff = next(self._active_coefficients)
     finat_element = create_element(coeff.ufl_function_space().ufl_element())
     return self._make_dat_wrapper_kernel_arg(finat_element)
 
@@ -923,12 +918,7 @@ class ParloopExecutor:
 
     @functools.cached_property
     def _active_coefficients(self):
-        coeffs = self._form.coefficients()
-        active_coeffs = []
-        for idx, subidxs in self._kinfo.coefficient_map:
-            for subidx in subidxs:
-                active_coeffs.append(coeffs[idx].split()[subidx])
-        return tuple(active_coeffs)
+        return iter_active_coefficients(self._form, self._kinfo)
 
     @functools.cached_property
     def mesh(self):
@@ -1046,13 +1036,13 @@ def _as_parloop_arg_coordinates(_, self):
 
 @_as_parloop_arg.register(kernel_args.ConstantKernelArg)
 def _as_parloop_arg_constant(arg, self):
-    coeff = self._active_coefficients[arg.number]
+    coeff = next(self._active_coefficients)
     return op2.GlobalParloopArg(coeff.dat)
 
 
 @_as_parloop_arg.register(kernel_args.CoefficientKernelArg)
 def _as_parloop_arg_coefficient(arg, self):
-    coeff = self._active_coefficients[arg.number]
+    coeff = next(self._active_coefficients)
     mp = self._get_map(coeff.function_space())
     return op2.DatParloopArg(coeff.dat, mp)
 
@@ -1091,3 +1081,9 @@ def _as_parloop_arg_layer_count(_, self):
     glob = op2.Global(LayerCountKernelArg.shape, self._iterset.layers-2,
                       dtype=LayerCountKernelArg.dtype)
     return op2.GlobalParloopArg(glob)
+
+
+def iter_active_coefficients(form, kinfo):
+    for idx, subidxs in kinfo.coefficient_map:
+        for subidx in subidxs:
+            yield form.coefficients()[idx].split()[subidx]
