@@ -9,6 +9,10 @@ import firedrake.utils as utils
 import ufl
 
 
+__all__ = ["RiemannianMetric", "IsotropicRiemannianMetric", "UniformRiemannianMetric",
+           "MetricBasedAdaptor", "adapt"]
+
+
 class Metric(object):
     """
     Abstract class that defines the API for all metrics.
