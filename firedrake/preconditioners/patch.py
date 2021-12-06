@@ -65,11 +65,7 @@ class LocalMatPayload(pyop2.legacy.MatPayload):
 
     @property
     def wrapper_kernel_arg(self):
-        map_args = []
-        for m in self.maps:
-            map_id = m.iterset, m.toset, m.name, m._wrapper_cache_key_
-            offset = tuple(m.offset) if m.offset is not None else None
-            map_args.append(op2.MapWrapperKernelArg(map_id, m.arity, offset))
+        map_args = [m.wrapper_kernel_arg for m in self.maps]
         return LocalMatWrapperKernelArg(self.mat.dims, map_args, unroll=self.unroll)
 
 
@@ -110,14 +106,9 @@ class LocalDatPayload(pyop2.legacy.DatPayload):
 
     @property
     def wrapper_kernel_arg(self):
-        if self.map_:
-            # offset cannot be a numpy array as it needs to be hashable
-            offset = tuple(self.map_.offset) if self.map_.offset is not None else None
-            map_id = self.map_.iterset, self.map_.toset, self.map_.name, self.map_._wrapper_cache_key_
-            map_arg = op2.MapWrapperKernelArg(map_id, self.map_.arity, offset)
-            return LocalDatWrapperKernelArg(self.dat.dataset.dim, map_arg, needs_mask=self.dat.needs_mask)
-        else:
-            return LocalDatWrapperKernelArg(self.dat.dataset.dim, needs_mask=self.dat.needs_mask)
+        map_arg = self.map_.wrapper_kernel_arg if self.map_ is not None else None
+        return LocalDatWrapperKernelArg(self.dat.dataset.dim, map_arg,
+                                        needs_mask=self.dat.needs_mask)
 
 
 class LocalDat(pyop2.types.AbstractDat):

@@ -615,6 +615,14 @@ class _AssembleWrapperKernelBuilder:
         self._unroll = unroll
         self._all_integer_subdomain_ids = all_integer_subdomain_ids.get(self._kinfo.integral_type, None)
 
+        self._map_arg_cache = {}
+        """Cache for holding :class:`op2.MapWrapperKernelArg` instances.
+
+        This cache is required to ensure that we use the same map argument when the
+        data objects in the parloop would be using the same map. This is to avoid
+        unnecessary packing in the wrapper kernel.
+        """
+
     def build(self):
         wrapper_kernel_args = [self._as_wrapper_kernel_arg(arg)
                                for arg in self._kinfo.tsfc_kernel_args
@@ -663,30 +671,38 @@ class _AssembleWrapperKernelBuilder:
         # TODO Make singledispatchmethod with Python 3.8
         return _as_wrapper_kernel_arg(tsfc_arg, self)
 
-    def get_dim_and_map(self, finat_element):
-        map_id = self._get_map_id(finat_element)
+    def _get_map_arg(self, finat_element):
+        key = self._get_map_id(finat_element)
 
-        # offset only valid for extruded
+        try:
+            return self._map_arg_cache[key]
+        except KeyError:
+            pass
+
+        shape = finat_element.index_shape
+        if isinstance(finat_element, finat.TensorFiniteElement):
+            shape = shape[:-len(finat_element._shape)]
+        arity = numpy.prod(shape, dtype=int)
+        if self._integral_type in {"interior_facet", "interior_facet_vert"}:
+            arity *= 2
+
         if self.mesh.extruded:
             offset = tuple(eutils.calculate_dof_offset(finat_element))
-            # For interior facet integrals we double the size of the offset array
+            # for interior facet integrals we double the size of the offset array
             if self._integral_type in {"interior_facet", "interior_facet_vert"}:
                 offset += offset
         else:
             offset = None
 
+        map_arg = op2.MapWrapperKernelArg(arity, offset)
+        self._map_arg_cache[key] = map_arg
+        return map_arg
+
+    def _get_dim(self, finat_element):
         if isinstance(finat_element, finat.TensorFiniteElement):
-            dim = finat_element._shape
-            arity = numpy.prod(finat_element.index_shape[:-len(dim)], dtype=int)
+            return finat_element._shape
         else:
-            dim = (1,)
-            arity = numpy.prod(finat_element.index_shape, dtype=int)
-
-        if self._integral_type in {"interior_facet", "interior_facet_vert"}:
-            arity *= 2
-
-        map_arg = op2.MapWrapperKernelArg(map_id, arity, offset)
-        return dim, map_arg
+            return (1,)
 
     def get_function_spaces(self, arguments):
         indices = self._indices
@@ -722,18 +738,16 @@ class _AssembleWrapperKernelBuilder:
             raise AssertionError
 
     def _make_dat_wrapper_kernel_arg(self, finat_element):
-        dim, map_arg = self.get_dim_and_map(finat_element)
+        dim = self._get_dim(finat_element)
+        map_arg = self._get_map_arg(finat_element)
         return op2.DatWrapperKernelArg(dim, map_arg)
 
     def _make_mat_wrapper_kernel_arg(self, relem, celem):
-        rdim, rmap_arg = self.get_dim_and_map(relem)
-        cdim, cmap_arg = self.get_dim_and_map(celem)
-
-        # PyOP2 matrix objects have scalar dims so we cope with that here...
-        rdim = (numpy.prod(rdim, dtype=int),)
-        cdim = (numpy.prod(cdim, dtype=int),)
-
-        return op2.MatWrapperKernelArg(((rdim+cdim,),), (rmap_arg, cmap_arg), unroll=self._unroll)
+        # PyOP2 matrix objects have scalar dims
+        rdim = (numpy.prod(self._get_dim(relem), dtype=int),)
+        cdim = (numpy.prod(self._get_dim(celem), dtype=int),)
+        map_args = self._get_map_arg(relem), self._get_map_arg(celem)
+        return op2.MatWrapperKernelArg(((rdim+cdim,),), map_args, unroll=self._unroll)
 
     @staticmethod
     def _get_map_id(finat_element):
