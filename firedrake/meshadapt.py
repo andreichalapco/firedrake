@@ -282,3 +282,38 @@ class AdaptorBase(object):
         :arg f: the field to be interpolated
         """
         pass
+
+
+class MetricBasedAdaptor(AdaptorBase):
+    """
+    Class for driving metric-based mesh adaptation.
+    """
+    def __init__(self, mesh, metric):
+        """
+        :arg mesh: :class:`MeshGeometry` to be adapted.
+        :arg metric: Riemannian metric :class:`Function`.
+        """
+        if isinstance(mesh.topology, fmesh.ExtrudedMeshTopology):
+            raise NotImplementedError("Cannot adapt extruded meshes")
+        coord_fe = mesh.coordinates.ufl_element()
+        if (coord_fe.family(), coord_fe.degree()) != ('Lagrange', 1):
+            raise NotImplementedError(f"Mesh coordinates must be P1, not {coord_fe}")
+        assert isinstance(metric, RiemannianMetric)
+        super().__init__(mesh)
+        self.metric = metric
+
+    @utils.cached_property
+    def adapted_mesh(self):
+        """
+        Adapt the mesh with respect to the provided metric.
+
+        :return: a new :class:`MeshGeometry`.
+        """
+        plex = self.mesh.topology_dm
+        self.metric.enforce_spd(restrict_sizes=True, restrict_anisotropy=True)
+        metric = self.metric.reordered
+        newplex = plex.adaptMetric(metric, "Face Sets", "Cell Sets")
+        return fmesh.Mesh(newplex)
+
+    def interpolate(self, f):
+        raise NotImplementedError  # TODO: Implement consistent interpolation in parallel
