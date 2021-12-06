@@ -1,4 +1,5 @@
 from firedrake import *
+from petsc4py import PETSc
 import pytest
 import numpy as np
 import sys
@@ -44,6 +45,7 @@ def test_size_restriction(dim):
     assert num_cells == expected
 
 
+@pytest.mark.parallel(nprocs=2)
 def test_normalisation(dim):
     """
     Test that normalising a metric with
@@ -59,13 +61,14 @@ def test_normalisation(dim):
         }
     }
     metric = UniformRiemannianMetric(mesh, 100.0, metric_parameters=mp)
-    pytest.skip('FIXME: segfault')  # FIXME: seg fault
-    metric.normalise()
-    metric.vec.array[:] /= pow(target, 2.0/dim)
-    expected = Function(metric)
-    expected.interpolate(Identity(dim))
-    with expected.dat.vec_ro as v:
-        assert np.allclose(metric_vec.array, v.array)
+    try:
+        metric.normalise()
+    except PETSc.Error as exc:
+        pytest.fail(f'FIXME: PETSc error code {exc.ierr}')  # FIXME
+    expected = UniformRiemannianMetric(mesh, pow(target, 2.0/dim))
+    metric._vec.axpy(-1, expected.vec)
+    norm = metric._vec.norm()
+    assert np.isclose(norm, 0.0)
 
 
 @pytest.mark.parallel(nprocs=2)
