@@ -256,3 +256,29 @@ class UniformRiemannianMetric(IsotropicRiemannianMetric):
         """
         super().__init__(mesh, **kwargs)
         self.interpolate(scaling)
+
+
+class AdaptorBase(object):
+    """
+    Abstract class that defines the API for all mesh adaptors.
+    """
+    __metaclass__ = ABCMeta
+
+    def __init__(self, mesh):
+        """
+        :arg mesh: mesh to be adapted
+        """
+        self.mesh = mesh
+
+    @abstractmethod
+    def adapted_mesh(self):
+        pass
+
+    @abstractmethod
+    def interpolate(self, f):
+        """
+        Interpolate a field from the initial mesh to the adapted mesh.
+
+        :arg f: the field to be interpolated
+        """
+        pass
