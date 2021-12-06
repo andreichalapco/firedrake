@@ -317,3 +317,22 @@ class MetricBasedAdaptor(AdaptorBase):
 
     def interpolate(self, f):
         raise NotImplementedError  # TODO: Implement consistent interpolation in parallel
+
+
+def adapt(mesh, *metrics, **kwargs):
+    r"""
+    Adapt a mesh with respect to a metric and some adaptor parameters.
+
+    If multiple metrics are provided, then they are intersected.
+
+    :arg mesh: :class:`MeshGeometry` to be adapted.
+    :arg metrics: Riemannian metric :class:`Function`\s.
+    :kwarg adaptor_parameters: parameters used to drive
+        the metric-based mesh adaptation
+    """
+    num_metrics = len(metrics)
+    metric = metrics[0]
+    if num_metrics > 1:
+        metric.intersect(*metrics[1:])
+    adaptor = MetricBasedAdaptor(mesh, metric)
+    return adaptor.adapted_mesh
