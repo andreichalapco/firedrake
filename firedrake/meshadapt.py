@@ -209,3 +209,50 @@ class RiemannianMetric(Metric):
     def project(self, *args, **kwargs):
         self.function.project(*args, **kwargs)
         return self
+
+
+class IsotropicRiemannianMetric(RiemannianMetric):
+    """
+    A :class:`RiemannianMetric` whose values are scalings of
+    the identity matrix.
+
+    Such a metric should give rise to isotropic meshes.
+    """
+    def __init__(self, mesh, **kwargs):
+        """
+        :arg mesh: mesh upon which to build the metric
+        :kwarg metric_parameters: PETSc parameters for
+            metric construction
+        """
+        super().__init__(mesh, **kwargs)
+        self.id = ufl.Identity(self.dim)
+
+    def assign(self, scaling, **kwargs):
+        return super().assign(scaling*self.id, **kwargs)
+
+    def interpolate(self, scaling, **kwargs):
+        return super().interpolate(scaling*self.id, **kwargs)
+
+    def project(self, scaling, **kwargs):
+        return super().project(scaling*self.id, **kwargs)
+
+
+class UniformRiemannianMetric(IsotropicRiemannianMetric):
+    """
+    A :class:`RiemannianMetric` that takes a constant
+    values across the domain, which is a scaling of
+    the identity matrix.
+
+    Such a metric should give rise to uniform, isotropic
+    meshes.
+    """
+    def __init__(self, mesh, scaling, **kwargs):
+        """
+        :arg mesh: mesh upon which to build the metric
+        :arg scaling: uniform scaling parameter for the
+            metric
+        :kwarg metric_parameters: PETSc parameters for
+            metric construction
+        """
+        super().__init__(mesh, **kwargs)
+        self.interpolate(scaling)
