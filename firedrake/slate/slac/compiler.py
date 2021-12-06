@@ -85,24 +85,21 @@ if not complex_mode:
 cell_to_facets_dtype = np.dtype(np.int8)
 
 
-@dataclass(frozen=True)
-class SlateKernel:
+class SlateKernel(TSFCKernel):
+    @classmethod
+    def _cache_key(cls, expr, compiler_parameters, coffee):
+        return md5((expr.expression_hash
+                    + str(sorted(compiler_parameters.items()))
+                    + str(coffee)).encode()).hexdigest(), expr.ufl_domains()[0].comm
 
-    split_kernel: tuple
-
-def slate_kernel_key(expr, compiler_parameters, coffee):
-    return md5((expr.expression_hash
-                + str(sorted(compiler_parameters.items()))
-                + str(coffee)).encode()).hexdigest(), expr.ufl_domains()[0].comm.py2f()
-
-
-@cached(LRUCache(maxsize=128), key=slate_kernel_key)
-def make_slate_kernel(expr, compiler_parameters, coffee=False):
-    if coffee:
-        split_kernel = generate_kernel(expr, compiler_parameters)
-    else:
-        split_kernel = generate_loopy_kernel(expr, compiler_parameters)
-    return SlateKernel(split_kernel)
+    def __init__(self, expr, compiler_parameters, coffee=False):
+        if self._initialized:
+            return
+        if coffee:
+            self.split_kernel = generate_kernel(expr, compiler_parameters)
+        else:
+            self.split_kernel = generate_loopy_kernel(expr, compiler_parameters)
+        self._initialized = True
 
 
 def compile_expression(slate_expr, compiler_parameters=None, coffee=False):
@@ -135,7 +132,7 @@ def compile_expression(slate_expr, compiler_parameters=None, coffee=False):
     try:
         return cache[key]
     except KeyError:
-        kernel = make_slate_kernel(slate_expr, params, coffee).split_kernel
+        kernel = SlateKernel(slate_expr, params, coffee).split_kernel
         return cache.setdefault(key, kernel)
 
 
