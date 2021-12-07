@@ -47,7 +47,7 @@ KernelInfo = collections.namedtuple("KernelInfo",
                                      "needs_cell_facets",
                                      "pass_layer_arg",
                                      "needs_cell_sizes",
-                                     "tsfc_kernel_args"])
+                                     "arguments"])
 
 
 class TSFCKernel(Cached):
@@ -150,7 +150,6 @@ ebugging.
                                                  kernel.arguments,
                                                  flop_count=kernel.flop_count,
                                                  opts=opts)
-            arguments = tuple(kernel.arguments) if kernel.arguments is not None else None
             kernels.append(KernelInfo(kernel=pyop2_kernel,
                                       integral_type=kernel.integral_type,
                                       oriented=kernel.oriented,
@@ -160,7 +159,7 @@ ebugging.
                                       needs_cell_facets=False,
                                       pass_layer_arg=False,
                                       needs_cell_sizes=kernel.needs_cell_sizes,
-                                      tsfc_kernel_args=arguments))
+                                      arguments=kernel.arguments))
         self.kernels = tuple(kernels)
         self._initialized = True
 
@@ -295,13 +294,10 @@ def gather_integer_subdomain_ids(knls):
 
 def as_pyop2_local_kernel(ast, name, arguments, access=op2.INC, **kwargs):
     """TODO"""
-    if arguments is not None:
-        knl_args = []
-        for i, arg in enumerate(arguments):
-            # all but the first argument to the kernel are read-only
-            acc = access if i == 0 else op2.READ
-            knl_args.append(op2.LocalKernelArg(acc, arg.loopy_arg.dtype))
-    else:
-        knl_args = None
+    knl_args = []
+    for i, arg in enumerate(arguments):
+        # all but the first argument to the kernel are read-only
+        acc = access if i == 0 else op2.READ
+        knl_args.append(op2.LocalKernelArg(acc, arg.dtype))
     return op2.Kernel(ast, name, knl_args,
                       requires_zeroed_output_arguments=True, **kwargs)

@@ -45,8 +45,8 @@ import numpy as np
 import loopy
 import gem
 from gem import indices as make_indices
+from tsfc.kernel_args import OutputKernelArg
 from tsfc.loopy import generate as generate_loopy
-from tsfc.kernel_interface.firedrake_loopy import OutputKernelArg
 import copy
 
 __all__ = ['compile_expression']
@@ -204,7 +204,7 @@ def generate_loopy_kernel(slate_expr, compiler_parameters=None):
                        needs_cell_facets=builder.bag.needs_cell_facets,
                        pass_layer_arg=builder.bag.needs_mesh_layers,
                        needs_cell_sizes=builder.bag.needs_cell_sizes,
-                       tsfc_kernel_args=arguments)
+                       arguments=arguments)
 
     # Cache the resulting kernel
     # Slate kernels are never split, so indicate that with None in the index slot.
@@ -372,7 +372,7 @@ def generate_kernel_ast(builder, statements, declared_temps):
                        needs_cell_facets=builder.needs_cell_facets,
                        pass_layer_arg=builder.needs_mesh_layers,
                        needs_cell_sizes=builder.needs_cell_sizes,
-                       tsfc_kernel_args=None)
+                       arguments=None)
 
     return kinfo
 

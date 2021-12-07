@@ -9,8 +9,8 @@ import cachetools
 import finat
 import firedrake
 import numpy
+from tsfc import kernel_args
 from tsfc.finatinterface import create_element
-import tsfc.kernel_interface.firedrake_loopy as kernel_interface
 import ufl
 from firedrake import (assemble_expressions, extrusion_utils as eutils, matrix, parameters, solving,
                        tsfc_interface, utils)
@@ -625,7 +625,7 @@ class _AssembleWrapperKernelBuilder:
 
     def build(self):
         wrapper_kernel_args = [self._as_wrapper_kernel_arg(arg)
-                               for arg in self._kinfo.tsfc_kernel_args]
+                               for arg in self._kinfo.arguments]
 
         iteration_regions = {"exterior_facet_top": op2.ON_TOP,
                              "exterior_facet_bottom": op2.ON_BOTTOM,
@@ -771,7 +771,7 @@ def _as_wrapper_kernel_arg(tsfc_arg, self):
     raise NotImplementedError
 
 
-@_as_wrapper_kernel_arg.register(kernel_interface.OutputKernelArg)
+@_as_wrapper_kernel_arg.register(kernel_args.OutputKernelArg)
 def _as_wrapper_kernel_arg_output(_, self):
     arguments = self._form.arguments()
 
@@ -799,14 +799,14 @@ def _as_wrapper_kernel_arg_output(_, self):
         return self.make_arg(elems)
 
 
-@_as_wrapper_kernel_arg.register(kernel_interface.CoordinatesKernelArg)
+@_as_wrapper_kernel_arg.register(kernel_args.CoordinatesKernelArg)
 def _as_wrapper_kernel_arg_coordinates(_, self):
     domain = self.mesh
     finat_element = create_element(domain.ufl_coordinate_element())
     return self._make_dat_wrapper_kernel_arg(finat_element)
 
 
-@_as_wrapper_kernel_arg.register(kernel_interface.CoefficientKernelArg)
+@_as_wrapper_kernel_arg.register(kernel_args.CoefficientKernelArg)
 def _as_wrapper_kernel_arg_coefficient(arg, self):
     coeff = next(self._active_coefficients)
     ufl_element = coeff.ufl_element()
@@ -818,21 +818,20 @@ def _as_wrapper_kernel_arg_coefficient(arg, self):
         return self._make_dat_wrapper_kernel_arg(finat_element)
 
 
-@_as_wrapper_kernel_arg.register(kernel_interface.CellSizesKernelArg)
+@_as_wrapper_kernel_arg.register(kernel_args.CellSizesKernelArg)
 def _as_wrapper_kernel_arg_cell_sizes(_, self):
-    domain = self.mesh
-    # See set_cell_sizes from tsfc.kernel_interface.firedrake_loopy
-    ufl_element = ufl.FiniteElement("P", domain.ufl_cell(), 1)
+    # mirror logic in TSFC set_cell_sizes
+    ufl_element = ufl.FiniteElement("P", self.mesh.ufl_cell(), 1)
     finat_element = create_element(ufl_element)
     return self._make_dat_wrapper_kernel_arg(finat_element)
 
 
-@_as_wrapper_kernel_arg.register(kernel_interface.ExteriorFacetKernelArg)
+@_as_wrapper_kernel_arg.register(kernel_args.ExteriorFacetKernelArg)
 def _as_wrapper_kernel_arg_exterior_facet(_, self):
     return op2.DatWrapperKernelArg((1,))
 
 
-@_as_wrapper_kernel_arg.register(kernel_interface.InteriorFacetKernelArg)
+@_as_wrapper_kernel_arg.register(kernel_args.InteriorFacetKernelArg)
 def _as_wrapper_kernel_arg_interior_facet(_, self):
     return op2.DatWrapperKernelArg((2,))
 
@@ -848,7 +847,7 @@ def _as_wrapper_kernel_arg_cell_facet(_, self):
     return op2.DatWrapperKernelArg((num_facets, 2))
 
 
-@_as_wrapper_kernel_arg.register(kernel_interface.CellOrientationsKernelArg)
+@_as_wrapper_kernel_arg.register(kernel_args.CellOrientationsKernelArg)
 def _as_wrapper_kernel_arg_cell_orientations(_, self):
     # this is taken largely from mesh.py where we observe that the function space is
     # DG0.
@@ -917,9 +916,8 @@ class ParloopExecutor:
         kinfo = self._split_knl.kinfo
 
         parloop_args = [_as_parloop_arg(tsfc_arg, self)
-                        for tsfc_arg in self._split_knl.kinfo.tsfc_kernel_args]
+                        for tsfc_arg in self._split_knl.kinfo.arguments]
         try:
-            # import pdb; pdb.set_trace()
             op2.parloop(self._knl, self._iterset, parloop_args)
         except MapValueError:
             raise RuntimeError("Integral measure does not match measure of all "
@@ -997,7 +995,7 @@ def _as_parloop_arg(tsfc_arg, self):
     raise NotImplementedError
 
 
-@_as_parloop_arg.register(kernel_interface.OutputKernelArg)
+@_as_parloop_arg.register(kernel_args.OutputKernelArg)
 def _as_parloop_arg_output(_, self):
     arguments = self._form.arguments()
 
@@ -1036,14 +1034,14 @@ def _as_parloop_arg_output(_, self):
             raise AssertionError
 
 
-@_as_parloop_arg.register(kernel_interface.CoordinatesKernelArg)
+@_as_parloop_arg.register(kernel_args.CoordinatesKernelArg)
 def _as_parloop_arg_coordinates(_, self):
     func = self.mesh.coordinates
     map_ = self._get_map(func.function_space())
     return op2.DatParloopArg(func.dat, map_)
 
 
-@_as_parloop_arg.register(kernel_interface.CoefficientKernelArg)
+@_as_parloop_arg.register(kernel_args.CoefficientKernelArg)
 def _as_parloop_arg_coefficient(arg, self):
     coeff = next(self._active_coefficients)
     if coeff.ufl_element().family() == "Real":
@@ -1053,26 +1051,26 @@ def _as_parloop_arg_coefficient(arg, self):
         return op2.DatParloopArg(coeff.dat, mp)
 
 
-@_as_parloop_arg.register(kernel_interface.CellOrientationsKernelArg)
+@_as_parloop_arg.register(kernel_args.CellOrientationsKernelArg)
 def _as_parloop_arg_cell_orientations(_, self):
     func = self.mesh.cell_orientations()
     mp = self._get_map(func.function_space())
     return op2.DatParloopArg(func.dat, mp)
 
 
-@_as_parloop_arg.register(kernel_interface.CellSizesKernelArg)
+@_as_parloop_arg.register(kernel_args.CellSizesKernelArg)
 def _as_parloop_arg_cell_sizes(_, self):
     func = self.mesh.cell_sizes
     mp = self._get_map(func.function_space())
     return op2.DatParloopArg(func.dat, mp)
 
 
-@_as_parloop_arg.register(kernel_interface.ExteriorFacetKernelArg)
+@_as_parloop_arg.register(kernel_args.ExteriorFacetKernelArg)
 def _as_parloop_arg_exterior_facet(_, self):
     return op2.DatParloopArg(self.mesh.exterior_facets.local_facet_dat)
 
 
-@_as_parloop_arg.register(kernel_interface.InteriorFacetKernelArg)
+@_as_parloop_arg.register(kernel_args.InteriorFacetKernelArg)
 def _as_parloop_arg_interior_facet(_, self):
     return op2.DatParloopArg(self.mesh.interior_facets.local_facet_dat)
 

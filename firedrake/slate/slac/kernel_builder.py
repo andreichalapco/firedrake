@@ -17,8 +17,8 @@ from functools import singledispatch
 import firedrake.slate.slate as slate
 from firedrake.slate.slac.tsfc_driver import compile_terminal_form
 
+from tsfc import kernel_args
 from tsfc.finatinterface import create_element
-import tsfc.kernel_interface.firedrake_loopy as kernel_interface
 from tsfc.loopy import create_domains, assign_dtypes
 
 from pytools import UniqueNameGenerator
@@ -43,11 +43,11 @@ Context information for creating coefficient temporaries.
 """
 
 
-class LayerCountKernelArg(kernel_interface.KernelArg):
+class LayerCountKernelArg(kernel_args.KernelArg):
     ...
 
 
-class CellFacetKernelArg(kernel_interface.KernelArg):
+class CellFacetKernelArg(kernel_args.KernelArg):
     ...
 
 
@@ -663,31 +663,31 @@ class LocalLoopyKernelBuilder(object):
         coords_extent = self.extent(self.expression.ufl_domain().coordinates)
         coords_loopy_arg = loopy.GlobalArg(self.coordinates_arg_name, shape=coords_extent,
                                            dtype=self.tsfc_parameters["scalar_type"])
-        args.append(kernel_interface.CoordinatesKernelArg(coords_loopy_arg))
+        args.append(kernel_args.CoordinatesKernelArg(coords_loopy_arg))
 
         if self.bag.needs_cell_orientations:
             ori_extent = self.extent(self.expression.ufl_domain().cell_orientations())
             ori_loopy_arg = loopy.GlobalArg(self.cell_orientations_arg_name,
                                             shape=ori_extent, dtype=np.int32)
-            args.append(kernel_interface.CellOrientationsKernelArg(ori_loopy_arg))
+            args.append(kernel_args.CellOrientationsKernelArg(ori_loopy_arg))
 
         if self.bag.needs_cell_sizes:
             siz_extent = self.extent(self.expression.ufl_domain().cell_sizes)
             siz_loopy_arg = loopy.GlobalArg(self.cell_sizes_arg_name, shape=siz_extent,
                                             dtype=self.tsfc_parameters["scalar_type"])
-            args.append(kernel_interface.CellSizesKernelArg(siz_loopy_arg))
+            args.append(kernel_args.CellSizesKernelArg(siz_loopy_arg))
 
         for coeff in self.bag.coefficients.values():
             if isinstance(coeff, OrderedDict):
                 for name, extent in coeff.values():
                     coeff_loopy_arg = loopy.GlobalArg(name, shape=extent,
                                                       dtype=self.tsfc_parameters["scalar_type"])
-                    args.append(kernel_interface.CoefficientKernelArg(coeff_loopy_arg))
+                    args.append(kernel_args.CoefficientKernelArg(coeff_loopy_arg))
             else:
                 name, extent = coeff
                 coeff_loopy_arg = loopy.GlobalArg(name, shape=extent,
                                                   dtype=self.tsfc_parameters["scalar_type"])
-                args.append(kernel_interface.CoefficientKernelArg(coeff_loopy_arg))
+                args.append(kernel_args.CoefficientKernelArg(coeff_loopy_arg))
 
         if self.bag.needs_cell_facets:
             # Arg for is exterior (==0)/interior (==1) facet or not
