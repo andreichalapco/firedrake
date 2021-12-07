@@ -5,6 +5,7 @@ import firedrake.cython.dmcommon as dmcommon
 import firedrake.function as func
 import firedrake.functionspace as fs
 import firedrake.mesh as fmesh
+from firedrake.petsc import PETSc
 import firedrake.utils as utils
 import ufl
 
@@ -32,6 +33,7 @@ class Metric(object):
         self.update_plex_coordinates()
 
     # TODO: This will be redundant at some point
+    @PETSc.Log.EventDecorator("Metric.update_plex_coordinates")
     def update_plex_coordinates(self):
         """
         Ensure that the coordinates of the Firedrake mesh and
@@ -75,6 +77,7 @@ class RiemannianMetric(Metric):
     """
     # TODO: Point to the section of the PETSc manual,
     #       once it has been updated.
+    @PETSc.Log.EventDecorator("RiemannianMetric.__init__")
     def __init__(self, mesh, metric_parameters={}):
         """
         :arg mesh: mesh upon which to build the metric
@@ -116,6 +119,7 @@ class RiemannianMetric(Metric):
         return self.function.dat
 
     @property
+    @PETSc.Log.EventDecorator("RiemannianMetric.reordered")
     def reordered(self):
         return dmcommon.to_petsc_local_numbering(self.vec, self.V)
 
@@ -149,6 +153,7 @@ class RiemannianMetric(Metric):
         self.plex.metricSetMaximumAnisotropy(mp['dm_plex_metric_a_max'])
         self.plex.metricSetNormalizationOrder(mp['dm_plex_metric_normalization_order'])
 
+    @PETSc.Log.EventDecorator("RiemannianMetric.enforce_spd")
     def enforce_spd(self, restrict_sizes=False, restrict_anisotropy=False):
         """
         Enforce that the metric is symmetric positive-definite.
@@ -162,6 +167,7 @@ class RiemannianMetric(Metric):
         )
         self.function.dat.data_with_halos[:] = self._to_function(tmp)
 
+    @PETSc.Log.EventDecorator("RiemannianMetric.normalise")
     def normalise(self, target_complexity=None, restrict_sizes=False, restrict_anisotropy=False):
         """
         Normalise the metric with respect to the provided target complexity.
@@ -179,6 +185,7 @@ class RiemannianMetric(Metric):
             self.vec, restrictSizes=restrict_sizes, restrictAnisotropy=restrict_anisotropy,
         ))
 
+    @PETSc.Log.EventDecorator("RiemannianMetric.intersect")
     def intersect(self, *metrics):
         """
         Intersect the metric with other metrics.
@@ -292,6 +299,7 @@ class MetricBasedAdaptor(AdaptorBase):
     """
     Class for driving metric-based mesh adaptation.
     """
+    @PETSc.Log.EventDecorator("MetricBasedAdaptor.__init__")
     def __init__(self, mesh, metric):
         """
         :arg mesh: :class:`MeshGeometry` to be adapted.
@@ -307,6 +315,7 @@ class MetricBasedAdaptor(AdaptorBase):
         self.metric = metric
 
     @utils.cached_property
+    @PETSc.Log.EventDecorator("MetricBasedAdaptor.adapted_mesh")
     def adapted_mesh(self):
         """
         Adapt the mesh with respect to the provided metric.
@@ -319,6 +328,7 @@ class MetricBasedAdaptor(AdaptorBase):
         newplex = plex.adaptMetric(metric, "Face Sets", "Cell Sets")
         return fmesh.Mesh(newplex)
 
+    @PETSc.Log.EventDecorator("MetricBasedAdaptor.interpolate")
     def interpolate(self, f):
         raise NotImplementedError  # TODO: Implement consistent interpolation in parallel
 
