@@ -16,8 +16,6 @@ this templated function library.
 """
 from coffee import base as ast
 
-from dataclasses import dataclass
-from cachetools import cached, LRUCache
 import time
 from hashlib import md5
 
@@ -36,8 +34,6 @@ from firedrake.utils import complex_mode, ScalarType_c, as_cstr
 from ufl.log import GREEN
 from gem.utils import groupby
 from gem import impero_utils
-from tsfc import kernel_args
-
 from itertools import chain
 
 from pyop2.utils import get_petsc_dir, as_tuple
@@ -50,6 +46,7 @@ import loopy
 import gem
 from gem import indices as make_indices
 from tsfc.loopy import generate as generate_loopy
+from tsfc.kernel_interface.firedrake_loopy import OutputKernelArg
 import copy
 
 __all__ = ['compile_expression']
@@ -168,40 +165,13 @@ def generate_loopy_kernel(slate_expr, compiler_parameters=None):
     if compiler_parameters["slate_compiler"]["optimise"]:
         slate_expr = optimise(slate_expr, compiler_parameters["slate_compiler"])
 
-    scalar_type = compiler_parameters["form_compiler"]["scalar_type"]
-
-    ###
-
-    # TODO Clean up A LOT
-    from tsfc.finatinterface import create_element
-    arguments = slate_expr.arguments()
-    if len(arguments) == 0:
-        output_arg = kernel_args.ScalarOutputKernelArg(scalar_type)
-    elif len(arguments) == 1:
-        argument, = arguments
-        el = create_element(argument.ufl_element())
-        output_arg = kernel_args.VectorOutputKernelArg((el.index_shape,), dtype=scalar_type)
-    elif len(arguments) == 2:
-        rargument, cargument = arguments
-        rufl = rargument.ufl_element()
-        rel = create_element(rufl)
-
-        cufl = cargument.ufl_element()
-        cel = create_element(cufl)
-
-        shapes = tuple(e.index_shape for e in [rel, cel])
-
-        output_arg = kernel_args.MatrixOutputKernelArg(shapes, dtype=scalar_type)
-    else:
-        raise AssertionError
-
-    ###
-
     # Create a loopy builder for the Slate expression,
     # e.g. contains the loopy kernels coming from TSFC
     gem_expr, var2terminal = slate_to_gem(slate_expr)
 
-    slate_loopy = gem_to_loopy(gem_expr, var2terminal, scalar_type, output_arg)
+    scalar_type = compiler_parameters["form_compiler"]["scalar_type"]
+    slate_loopy, output_arg = gem_to_loopy(gem_expr, var2terminal, scalar_type)
+
 
     builder = LocalLoopyKernelBuilder(expression=slate_expr,
                                       tsfc_parameters=compiler_parameters["form_compiler"])
@@ -672,7 +642,7 @@ def parenthesize(arg, prec=None, parent=None):
     return "(%s)" % arg
 
 
-def gem_to_loopy(gem_expr, var2terminal, scalar_type, output_arg):
+def gem_to_loopy(gem_expr, var2terminal, scalar_type):
     """ Method encapsulating stage 2.
     Converts the gem expression dag into imperoc first, and then further into loopy.
     :return slate_loopy: 2-tuple of loopy kernel for slate operations
@@ -682,10 +652,14 @@ def gem_to_loopy(gem_expr, var2terminal, scalar_type, output_arg):
     shape = gem_expr.shape if len(gem_expr.shape) != 0 else (1,)
     idx = make_indices(len(shape))
     indexed_gem_expr = gem.Indexed(gem_expr, idx)
-    args = ([output_arg.loopy_arg]
-            + [loopy.GlobalArg(var.name, shape=var.shape, dtype=scalar_type)
-               for var in var2terminal.keys()])
-    ret_vars = [gem.Indexed(gem.Variable("A", shape), idx)]
+
+    output_loopy_arg = loopy.GlobalArg("output", shape=shape,
+                                       dtype=scalar_type,
+                                       is_input=True,
+                                       is_output=True)
+    args = [output_loopy_arg] + [loopy.GlobalArg(var.name, shape=var.shape, dtype=scalar_type)
+                                 for var in var2terminal.keys()]
+    ret_vars = [gem.Indexed(gem.Variable("output", shape), idx)]
 
     preprocessed_gem_expr = impero_utils.preprocess_gem([indexed_gem_expr])
 
@@ -696,7 +670,8 @@ def gem_to_loopy(gem_expr, var2terminal, scalar_type, output_arg):
     impero_c = impero_utils.compile_gem(assignments, (), remove_zeros=False)
 
     # Part B: impero_c to loopy
-    return generate_loopy(impero_c, args, scalar_type, "slate_loopy", [])
+    output_arg = OutputKernelArg(output_loopy_arg)
+    return generate_loopy(impero_c, args, scalar_type, "slate_loopy", []), output_arg
 
 
 def slate_to_cpp(expr, temps, prec=None):

@@ -21,7 +21,6 @@ from firedrake.function import Function
 from .ufl_expr import TestFunction
 
 from tsfc import compile_form as tsfc_compile_form
-from tsfc import kernel_args
 from tsfc.parameters import PARAMETERS as tsfc_default_parameters
 
 from pyop2 import op2
@@ -296,11 +295,12 @@ def gather_integer_subdomain_ids(knls):
 
 def as_pyop2_local_kernel(ast, name, arguments, access=op2.INC, **kwargs):
     """TODO"""
-    access_map = {kernel_args.Intent.IN: op2.READ,
-                  kernel_args.Intent.OUT: access}
     if arguments is not None:
-        knl_args = [op2.LocalKernelArg(access_map[arg.intent], arg.dtype)
-                    for arg in arguments if arg.intent is not None]
+        knl_args = []
+        for i, arg in enumerate(arguments):
+            # all but the first argument to the kernel are read-only
+            acc = access if i == 0 else op2.READ
+            knl_args.append(op2.LocalKernelArg(acc, arg.loopy_arg.dtype))
     else:
         knl_args = None
     return op2.Kernel(ast, name, knl_args,

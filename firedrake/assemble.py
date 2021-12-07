@@ -9,8 +9,8 @@ import cachetools
 import finat
 import firedrake
 import numpy
-from tsfc import kernel_args
 from tsfc.finatinterface import create_element
+import tsfc.kernel_interface.firedrake_loopy as kernel_interface
 import ufl
 from firedrake import (assemble_expressions, extrusion_utils as eutils, matrix, parameters, solving,
                        tsfc_interface, utils)
@@ -19,7 +19,7 @@ from firedrake.bcs import DirichletBC, EquationBC, EquationBCSplit
 from firedrake.functionspacedata import entity_dofs_key, entity_permutations_key
 from firedrake.petsc import PETSc
 from firedrake.slate import slac, slate
-from firedrake.slate.slac.kernel_builder import CellFacetKernelArg, LayerCountKernelArg, LayerKernelArg
+from firedrake.slate.slac.kernel_builder import CellFacetKernelArg, LayerCountKernelArg
 from firedrake.utils import ScalarType, tuplify
 from pyop2 import op2
 import pyop2.wrapper_kernel
@@ -625,8 +625,7 @@ class _AssembleWrapperKernelBuilder:
 
     def build(self):
         wrapper_kernel_args = [self._as_wrapper_kernel_arg(arg)
-                               for arg in self._kinfo.tsfc_kernel_args
-                               if arg.intent is not None]
+                               for arg in self._kinfo.tsfc_kernel_args]
 
         iteration_regions = {"exterior_facet_top": op2.ON_TOP,
                              "exterior_facet_bottom": op2.ON_BOTTOM,
@@ -772,7 +771,7 @@ def _as_wrapper_kernel_arg(tsfc_arg, self):
     raise NotImplementedError
 
 
-@_as_wrapper_kernel_arg.register(kernel_args.OutputKernelArg)
+@_as_wrapper_kernel_arg.register(kernel_interface.OutputKernelArg)
 def _as_wrapper_kernel_arg_output(_, self):
     arguments = self._form.arguments()
 
@@ -800,29 +799,26 @@ def _as_wrapper_kernel_arg_output(_, self):
         return self.make_arg(elems)
 
 
-@_as_wrapper_kernel_arg.register(kernel_args.CoordinatesKernelArg)
+@_as_wrapper_kernel_arg.register(kernel_interface.CoordinatesKernelArg)
 def _as_wrapper_kernel_arg_coordinates(_, self):
     domain = self.mesh
     finat_element = create_element(domain.ufl_coordinate_element())
     return self._make_dat_wrapper_kernel_arg(finat_element)
 
 
-@_as_wrapper_kernel_arg.register(kernel_args.ConstantKernelArg)
-def _as_wrapper_kernel_arg_constant(arg, self):
-    coeff = next(self._active_coefficients)
-    ufl_element = coeff.ufl_function_space().ufl_element()
-    assert ufl_element.family() == "Real"
-    return op2.GlobalWrapperKernelArg((ufl_element.value_size(),))
-
-
-@_as_wrapper_kernel_arg.register(kernel_args.CoefficientKernelArg)
+@_as_wrapper_kernel_arg.register(kernel_interface.CoefficientKernelArg)
 def _as_wrapper_kernel_arg_coefficient(arg, self):
     coeff = next(self._active_coefficients)
-    finat_element = create_element(coeff.ufl_function_space().ufl_element())
-    return self._make_dat_wrapper_kernel_arg(finat_element)
+    ufl_element = coeff.ufl_element()
+    
+    if ufl_element.family() == "Real":
+        return op2.GlobalWrapperKernelArg((ufl_element.value_size(),))
+    else:
+        finat_element = create_element(coeff.ufl_function_space().ufl_element())
+        return self._make_dat_wrapper_kernel_arg(finat_element)
 
 
-@_as_wrapper_kernel_arg.register(kernel_args.CellSizesKernelArg)
+@_as_wrapper_kernel_arg.register(kernel_interface.CellSizesKernelArg)
 def _as_wrapper_kernel_arg_cell_sizes(_, self):
     domain = self.mesh
     # See set_cell_sizes from tsfc.kernel_interface.firedrake_loopy
@@ -831,12 +827,12 @@ def _as_wrapper_kernel_arg_cell_sizes(_, self):
     return self._make_dat_wrapper_kernel_arg(finat_element)
 
 
-@_as_wrapper_kernel_arg.register(kernel_args.ExteriorFacetKernelArg)
+@_as_wrapper_kernel_arg.register(kernel_interface.ExteriorFacetKernelArg)
 def _as_wrapper_kernel_arg_exterior_facet(_, self):
     return op2.DatWrapperKernelArg((1,))
 
 
-@_as_wrapper_kernel_arg.register(kernel_args.InteriorFacetKernelArg)
+@_as_wrapper_kernel_arg.register(kernel_interface.InteriorFacetKernelArg)
 def _as_wrapper_kernel_arg_interior_facet(_, self):
     return op2.DatWrapperKernelArg((2,))
 
@@ -852,7 +848,7 @@ def _as_wrapper_kernel_arg_cell_facet(_, self):
     return op2.DatWrapperKernelArg((num_facets, 2))
 
 
-@_as_wrapper_kernel_arg.register(kernel_args.CellOrientationsKernelArg)
+@_as_wrapper_kernel_arg.register(kernel_interface.CellOrientationsKernelArg)
 def _as_wrapper_kernel_arg_cell_orientations(_, self):
     # this is taken largely from mesh.py where we observe that the function space is
     # DG0.
@@ -920,11 +916,10 @@ class ParloopExecutor:
     def run(self):
         kinfo = self._split_knl.kinfo
 
-        parloop_args = [
-            _as_parloop_arg(tsfc_arg, self)
-            for tsfc_arg in self._split_knl.kinfo.tsfc_kernel_args if tsfc_arg.intent is not None
-        ]
+        parloop_args = [_as_parloop_arg(tsfc_arg, self)
+                        for tsfc_arg in self._split_knl.kinfo.tsfc_kernel_args]
         try:
+            # import pdb; pdb.set_trace()
             op2.parloop(self._knl, self._iterset, parloop_args)
         except MapValueError:
             raise RuntimeError("Integral measure does not match measure of all "
@@ -1002,7 +997,7 @@ def _as_parloop_arg(tsfc_arg, self):
     raise NotImplementedError
 
 
-@_as_parloop_arg.register(kernel_args.OutputKernelArg)
+@_as_parloop_arg.register(kernel_interface.OutputKernelArg)
 def _as_parloop_arg_output(_, self):
     arguments = self._form.arguments()
 
@@ -1041,46 +1036,43 @@ def _as_parloop_arg_output(_, self):
             raise AssertionError
 
 
-@_as_parloop_arg.register(kernel_args.CoordinatesKernelArg)
+@_as_parloop_arg.register(kernel_interface.CoordinatesKernelArg)
 def _as_parloop_arg_coordinates(_, self):
     func = self.mesh.coordinates
     map_ = self._get_map(func.function_space())
     return op2.DatParloopArg(func.dat, map_)
 
 
-@_as_parloop_arg.register(kernel_args.ConstantKernelArg)
-def _as_parloop_arg_constant(arg, self):
-    coeff = next(self._active_coefficients)
-    return op2.GlobalParloopArg(coeff.dat)
-
-
-@_as_parloop_arg.register(kernel_args.CoefficientKernelArg)
+@_as_parloop_arg.register(kernel_interface.CoefficientKernelArg)
 def _as_parloop_arg_coefficient(arg, self):
     coeff = next(self._active_coefficients)
-    mp = self._get_map(coeff.function_space())
-    return op2.DatParloopArg(coeff.dat, mp)
+    if coeff.ufl_element().family() == "Real":
+        return op2.GlobalParloopArg(coeff.dat)
+    else:
+        mp = self._get_map(coeff.function_space())
+        return op2.DatParloopArg(coeff.dat, mp)
 
 
-@_as_parloop_arg.register(kernel_args.CellOrientationsKernelArg)
+@_as_parloop_arg.register(kernel_interface.CellOrientationsKernelArg)
 def _as_parloop_arg_cell_orientations(_, self):
     func = self.mesh.cell_orientations()
     mp = self._get_map(func.function_space())
     return op2.DatParloopArg(func.dat, mp)
 
 
-@_as_parloop_arg.register(kernel_args.CellSizesKernelArg)
+@_as_parloop_arg.register(kernel_interface.CellSizesKernelArg)
 def _as_parloop_arg_cell_sizes(_, self):
     func = self.mesh.cell_sizes
     mp = self._get_map(func.function_space())
     return op2.DatParloopArg(func.dat, mp)
 
 
-@_as_parloop_arg.register(kernel_args.ExteriorFacetKernelArg)
+@_as_parloop_arg.register(kernel_interface.ExteriorFacetKernelArg)
 def _as_parloop_arg_exterior_facet(_, self):
     return op2.DatParloopArg(self.mesh.exterior_facets.local_facet_dat)
 
 
-@_as_parloop_arg.register(kernel_args.InteriorFacetKernelArg)
+@_as_parloop_arg.register(kernel_interface.InteriorFacetKernelArg)
 def _as_parloop_arg_interior_facet(_, self):
     return op2.DatParloopArg(self.mesh.interior_facets.local_facet_dat)
 
@@ -1092,8 +1084,8 @@ def _as_parloop_arg_cell_facet(_, self):
 
 @_as_parloop_arg.register(LayerCountKernelArg)
 def _as_parloop_arg_layer_count(_, self):
-    glob = op2.Global(LayerCountKernelArg.shape, self._iterset.layers-2,
-                      dtype=LayerCountKernelArg.dtype)
+    glob = op2.Global((1,), self._iterset.layers-2,
+                      dtype=numpy.int32)
     return op2.GlobalParloopArg(glob)
 
 

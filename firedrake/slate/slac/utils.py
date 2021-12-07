@@ -300,19 +300,9 @@ def merge_loopy(slate_loopy, output_arg, builder, var2terminal, name):
         tsfc_calls = ()
         tsfc_kernels = ()
 
-    # Construct args
-    args = [output_arg] + builder.generate_wrapper_kernel_args(tensor2temp)
-
-    # kernel_args is a list of all the non-temporary arguments (i.e. those that get
-    # passed in to the kernel).
-    kernel_args = []
-    loopy_args = []
-    for arg in args:
-        if not isinstance(arg, lp.TemporaryVariable):
-            kernel_args.append(arg)
-            loopy_args.append(arg.loopy_arg)
-        else:
-            loopy_args.append(arg)
+    args, tmp_args = builder.generate_wrapper_kernel_args(tensor2temp)
+    kernel_args = [output_arg] + args
+    loopy_args = [output_arg.loopy_arg] + [a.loopy_arg for a in args] + tmp_args
 
     # Munge instructions
     insns = inits

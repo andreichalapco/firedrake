@@ -17,8 +17,8 @@ from functools import singledispatch
 import firedrake.slate.slate as slate
 from firedrake.slate.slac.tsfc_driver import compile_terminal_form
 
-from tsfc import kernel_args
 from tsfc.finatinterface import create_element
+import tsfc.kernel_interface.firedrake_loopy as kernel_interface
 from tsfc.loopy import create_domains, assign_dtypes
 
 from pytools import UniqueNameGenerator
@@ -43,55 +43,12 @@ Context information for creating coefficient temporaries.
 """
 
 
-class LayerCountKernelArg(kernel_args.RankZeroKernelArg):
-
-    name = "layer_count"
-    dtype = np.int32
-    shape = (1,)
-    intent = kernel_args.Intent.IN
-
-    # @property
-    # def shape(self):
-    #     raise NotImplementedError
-        # shape = (1,)
-
-    @property
-    def loopy_arg(self):
-        return loopy.GlobalArg(self.name, self.dtype, shape=())
+class LayerCountKernelArg(kernel_interface.KernelArg):
+    ...
 
 
-class LayerKernelArg(kernel_args.KernelArg):
-
-    name = "layer"
-    dtype = np.int32
-    intent = None  # we skip this in outer kernel (this is ugly)
-
-    @property
-    def shape(self):
-        raise NotImplementedError
-
-    @property
-    def loopy_arg(self):
-        return loopy.ValueArg(self.name, self.dtype)
-
-
-class CellFacetKernelArg(kernel_args.KernelArg):
-
-    name = "cell_facets"
-    dtype = np.int8
-    intent = kernel_args.Intent.IN
-
-    def __init__(self, shape):
-        self._shape = shape
-
-    @property
-    def shape(self):
-        return self._shape
-
-    @property
-    def loopy_arg(self):
-        # shape = np.prod(self.shape, dtype=int)
-        return loopy.GlobalArg(self.name, shape=self._shape, dtype=self.dtype)
+class CellFacetKernelArg(kernel_interface.KernelArg):
+    ...
 
 
 class LocalKernelBuilder(object):
@@ -440,11 +397,13 @@ class LocalKernelBuilder(object):
 
 class LocalLoopyKernelBuilder(object):
 
-    local_facet_array_arg = "facet_array"
-    layer_arg = "layer"
-    layer_count = "layer_count"
-    result_arg = "result"
-    cell_orientations_arg = "cell_orientations"
+    coordinates_arg_name = "coords"
+    cell_facets_arg_name = "cell_facets"
+    local_facet_array_arg_name = "facet_array"
+    layer_arg_name = "layer"
+    layer_count_name = "layer_count"
+    cell_sizes_arg_name = "cell_sizes"
+    cell_orientations_arg_name = "cell_orientations"
 
     # Supported integral types
     supported_integral_types = [
@@ -518,28 +477,25 @@ class LocalLoopyKernelBuilder(object):
             that are coordinates, orientations, cell sizes and cofficients.
         """
 
-        kernel_data = [(mesh.coordinates,
-                        kernel_args.CoordinatesKernelArg.name)]
+        kernel_data = [(mesh.coordinates, self.coordinates_arg_name)]
 
         if kinfo.oriented:
             self.bag.needs_cell_orientations = True
-            kernel_data.append((mesh.cell_orientations(),
-                                kernel_args.CellOrientationsKernelArg.name))
+            kernel_data.append((mesh.cell_orientations(), self.cell_orientations_arg_name))
 
         if kinfo.needs_cell_sizes:
             self.bag.needs_cell_sizes = True
-            kernel_data.append((mesh.cell_sizes,
-                                kernel_args.CellSizesKernelArg.name))
+            kernel_data.append((mesh.cell_sizes, self.cell_sizes_arg_name))
 
         # Pick the coefficients associated with a Tensor()/TSFC kernel
         tsfc_coefficients = [tsfc_coefficients[i] for i, _ in kinfo.coefficient_map]
         for c, cinfo in wrapper_coefficients.items():
             if c in tsfc_coefficients:
-                if isinstance(cinfo, str):
-                    kernel_data.extend([(c, cinfo)])
+                if isinstance(cinfo, tuple):
+                    kernel_data.extend([(c, cinfo[0])])
                 else:
                     for c_, info in cinfo.items():
-                        kernel_data.extend([(c_, info)])
+                        kernel_data.extend([(c_, info[0])])
         return kernel_data
 
     def loopify_tsfc_kernel_data(self, kernel_data):
@@ -557,10 +513,10 @@ class LocalLoopyKernelBuilder(object):
 
     def layer_integral_predicates(self, tensor, integral_type):
         self.bag.needs_mesh_layers = True
-        layer = pym.Variable(self.layer_arg)
+        layer = pym.Variable(self.layer_arg_name)
 
         # TODO: Variable layers
-        nlayer = pym.Variable(self.layer_count)
+        nlayer = pym.Variable(self.layer_count_name)
         which = {"interior_facet_horiz_top": pym.Comparison(layer, "<", nlayer[0]),
                  "interior_facet_horiz_bottom": pym.Comparison(layer, ">", 0),
                  "exterior_facet_top": pym.Comparison(layer, "==", nlayer[0]),
@@ -583,16 +539,16 @@ class LocalLoopyKernelBuilder(object):
         select = 1 if integral_type.startswith("interior_facet") else 0
 
         i = self.bag.index_creator((1,))
-        predicates = [pym.Comparison(pym.Subscript(pym.Variable(CellFacetKernelArg.name), (fidx[0], 0)), "==", select)]
+        predicates = [pym.Comparison(pym.Subscript(pym.Variable(self.cell_facets_arg_name), (fidx[0], 0)), "==", select)]
 
         # TODO subdomain boundary integrals, this does the wrong thing for integrals like f*ds + g*ds(1)
         # "otherwise" is treated incorrectly as "everywhere"
         # However, this replicates an existing slate bug.
         if kinfo.subdomain_id != "otherwise":
-            predicates.append(pym.Comparison(pym.Subscript(pym.Variable(CellFacetKernelArg.name), (fidx[0], 1)), "==", kinfo.subdomain_id))
+            predicates.append(pym.Comparison(pym.Subscript(pym.Variable(self.cell_facets_arg_name), (fidx[0], 1)), "==", kinfo.subdomain_id))
 
         # Additional facet array argument to be fed into tsfc loopy kernel
-        subscript = pym.Subscript(pym.Variable(self.local_facet_array_arg),
+        subscript = pym.Subscript(pym.Variable(self.local_facet_array_arg_name),
                                   (pym.Sum((i[0], fidx[0]))))
         facet_arg = SubArrayRef(i, subscript)
 
@@ -617,21 +573,21 @@ class LocalLoopyKernelBuilder(object):
             return False
 
     def collect_coefficients(self):
-        """ Saves all coefficients of self.expression, where non mixed coefficient
-            are of dict of form {coeff: (name, basis_shape, node_shape)} and mixed coefficient are
-            double dict of form {mixed_coeff: {coeff_per_space: (name, basis_shape, node_shape)}}.
+        """Saves all coefficients of self.expression where non-mixed coefficients
+        are dicts of form {coeff: (name, extent)} and mixed coefficients are
+        double dicts of form {mixed_coeff: {coeff_per_space: (name, extent)}}.
         """
         coeffs = self.expression.coefficients()
         coeff_dict = OrderedDict()
-        for i, coeff in enumerate(coeffs):
-            element = coeff.ufl_element()
+        for i, c in enumerate(coeffs):
+            element = c.ufl_element()
             if type(element) == MixedElement:
-                subcoeff_dict = OrderedDict()
-                for j, subcoeff in enumerate(coeff.split()):
-                    subcoeff_dict[subcoeff] = f"w_{i}_{j}"
-                coeff_dict[coeff] = subcoeff_dict
+                mixed = OrderedDict()
+                for j, c_ in enumerate(c.split()):
+                    mixed[c_] = f"w_{i}_{j}", self.extent(c_)
+                coeff_dict[c] = mixed
             else:
-                coeff_dict[coeff] = f"w_{i}"
+                coeff_dict[c] = f"w_{i}", self.extent(c)
         return coeff_dict
 
     def initialise_terminals(self, var2terminal, coefficients):
@@ -661,20 +617,20 @@ class LocalLoopyKernelBuilder(object):
             else:
                 f = slate_tensor.form if isinstance(slate_tensor.form, tuple) else (slate_tensor.form,)
 
-                names = []
-                for coeff in f:
-                    if type(coeff.ufl_element()) == MixedElement:
-                        names += [name for name in coefficients[coeff].values()]
-                    else:
-                        names.append(coefficients[coeff])
-
+                coeff = tuple(coefficients[c] for c in f)
                 offset = 0
+                ismixed = tuple((type(c.ufl_element()) == MixedElement) for c in f)
+
+                names = []
+                for (im, c) in zip(ismixed, coeff):
+                    names += [name for (name, ext) in c.values()] if im else [c[0]]
+
                 # Mixed coefficients come as seperate parameter (one per space)
                 for i, shp in enumerate(*slate_tensor.shapes.values()):
                     indices = self.bag.index_creator((shp,))
                     inames = {var.name for var in indices}
                     offset_index = (pym.Sum((offset, indices[0])),)
-                    name = names[i]
+                    name = names[i] if ismixed else names
                     var = pym.Subscript(pym.Variable(loopy_tensor.name), offset_index)
                     c = pym.Subscript(pym.Variable(name), indices)
                     inits.append(loopy.Assignment(var, c, id="init%d" % len(inits),
@@ -701,69 +657,64 @@ class LocalLoopyKernelBuilder(object):
         return insn
 
     def generate_wrapper_kernel_args(self, tensor2temp):
-        coords = self.expression.ufl_domain().coordinates
-        import tsfc
+        args = []
+        tmp_args = []
 
-        coords_el = tsfc.finatinterface.create_element(coords.ufl_element())
-        args = [kernel_args.CoordinatesKernelArg((coords_el.index_shape,), dtype=self.tsfc_parameters["scalar_type"])]
+        coords_extent = self.extent(self.expression.ufl_domain().coordinates)
+        coords_loopy_arg = loopy.GlobalArg(self.coordinates_arg_name, shape=coords_extent,
+                                           dtype=self.tsfc_parameters["scalar_type"])
+        args.append(kernel_interface.CoordinatesKernelArg(coords_loopy_arg))
 
         if self.bag.needs_cell_orientations:
             ori_extent = self.extent(self.expression.ufl_domain().cell_orientations())
-            args.append(kernel_args.CellOrientationsKernelArg(ori_extent))
+            ori_loopy_arg = loopy.GlobalArg(self.cell_orientations_arg_name,
+                                            shape=ori_extent, dtype=np.int32)
+            args.append(kernel_interface.CellOrientationsKernelArg(ori_loopy_arg))
 
         if self.bag.needs_cell_sizes:
-            myelem = self.expression.ufl_domain().cell_sizes.ufl_element()
-            finat_element = create_element(myelem)
-            args.append(kernel_args.CellSizesKernelArg(
-                        (finat_element.index_shape,), dtype=self.tsfc_parameters["scalar_type"]))
+            siz_extent = self.extent(self.expression.ufl_domain().cell_sizes)
+            siz_loopy_arg = loopy.GlobalArg(self.cell_sizes_arg_name, shape=siz_extent,
+                                            dtype=self.tsfc_parameters["scalar_type"])
+            args.append(kernel_interface.CellSizesKernelArg(siz_loopy_arg))
 
-        ctr = count()
-        for coeff, val in self.bag.coefficients.items():
-            if isinstance(val, OrderedDict):
-                for sub_coeff, name in val.items():
-                    ufl_element = sub_coeff.ufl_element()
-                    finat_element = create_element(ufl_element)
-                    coeff_number = next(ctr)
-                    arg = kernel_args.CoefficientKernelArg(
-                        name, coeff_number, (finat_element.index_shape,), dtype=self.tsfc_parameters["scalar_type"]
-                    )
-                    args.append(arg)
+        for coeff in self.bag.coefficients.values():
+            if isinstance(coeff, OrderedDict):
+                for name, extent in coeff.values():
+                    coeff_loopy_arg = loopy.GlobalArg(name, shape=extent,
+                                                      dtype=self.tsfc_parameters["scalar_type"])
+                    args.append(kernel_interface.CoefficientKernelArg(coeff_loopy_arg))
             else:
-                name = val
-                coeff_number = next(ctr)
-                if coeff.ufl_element().family() == "Real":
-                    shape = self.extent(coeff)
-                    arg = kernel_args.ConstantKernelArg(
-                        name, coeff_number, shape, self.tsfc_parameters["scalar_type"]
-                    )
-                else:
-                    finat_element = create_element(coeff.ufl_element())
-                    arg = kernel_args.CoefficientKernelArg(
-                        name, coeff_number, (finat_element.index_shape,), dtype=self.tsfc_parameters["scalar_type"]
-                    )
-                args.append(arg)
+                name, extent = coeff
+                coeff_loopy_arg = loopy.GlobalArg(name, shape=extent,
+                                                  dtype=self.tsfc_parameters["scalar_type"])
+                args.append(kernel_interface.CoefficientKernelArg(coeff_loopy_arg))
 
         if self.bag.needs_cell_facets:
             # Arg for is exterior (==0)/interior (==1) facet or not
-            args.append(CellFacetKernelArg((self.num_facets, 2)))
+            facet_loopy_arg = loopy.GlobalArg(self.cell_facets_arg_name,
+                                              shape=(self.num_facets, 2),
+                                              dtype=np.int8)
+            args.append(CellFacetKernelArg(facet_loopy_arg))
 
-            args.append(
-                loopy.TemporaryVariable(self.local_facet_array_arg,
-                                        shape=(self.num_facets,),
-                                        dtype=np.uint32,
-                                        address_space=loopy.AddressSpace.LOCAL,
-                                        read_only=True,
-                                        initializer=np.arange(self.num_facets, dtype=np.uint32),))
+            tmp_args.append(loopy.TemporaryVariable(self.local_facet_array_arg_name,
+                                                    shape=(self.num_facets,),
+                                                    dtype=np.uint32,
+                                                    address_space=loopy.AddressSpace.LOCAL,
+                                                    read_only=True,
+                                                    initializer=np.arange(self.num_facets, dtype=np.uint32),))
 
         # TODO There are two args added here but only one in assemble?
         if self.bag.needs_mesh_layers:
-            args.append(LayerCountKernelArg())
-            args.append(LayerKernelArg())
+            layer_loopy_arg = loopy.GlobalArg(self.layer_count_name, shape=(),
+                                              dtype=np.int32)
+            args.append(LayerCountKernelArg(layer_loopy_arg))
+
+            tmp_args.append(loopy.ValueArg(self.layer_arg_name, dtype=np.int32))
 
         for tensor_temp in tensor2temp.values():
-            args.append(tensor_temp)
+            tmp_args.append(tensor_temp)
 
-        return args
+        return args, tmp_args
 
     def generate_tsfc_calls(self, terminal, loopy_tensor):
         """A setup method to initialize all the local assembly
