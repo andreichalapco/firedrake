@@ -7,8 +7,6 @@ from ufl.indexed import Indexed
 from ufl.domain import join_domains
 
 from pyop2 import op2, READ, WRITE, RW, INC, MIN, MAX
-import pyop2
-import pyop2.legacy
 import loopy
 from loopy.version import LOOPY_USE_LANGUAGE_VERSION_2018_2  # noqa: F401
 import coffee.base as ast
@@ -374,4 +372,4 @@ def par_loop(kernel, measure, args, kernel_kwargs=None, is_loopy_kernel=False, *
         return f.dat(intent, _map['nodes'](f))
     op2args += [mkarg(func, intent) for (func, intent) in args.values()]
 
-    return pyop2.legacy.par_loop(*op2args, **kwargs)
+    return op2.parloop(*op2args, **kwargs)

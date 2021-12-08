@@ -22,7 +22,6 @@ from firedrake.slate import slac, slate
 from firedrake.slate.slac.kernel_builder import CellFacetKernelArg, LayerCountKernelArg
 from firedrake.utils import ScalarType, tuplify
 from pyop2 import op2
-import pyop2.wrapper_kernel
 from pyop2.exceptions import MapValueError, SparsityFormatError
 
 
@@ -616,7 +615,7 @@ class _AssembleWrapperKernelBuilder:
         self._all_integer_subdomain_ids = all_integer_subdomain_ids.get(self._kinfo.integral_type, None)
 
         self._map_arg_cache = {}
-        """Cache for holding :class:`op2.MapWrapperKernelArg` instances.
+        """Cache for holding :class:`op2.MapKernelArg` instances.
 
         This cache is required to ensure that we use the same map argument when the
         data objects in the parloop would be using the same map. This is to avoid
@@ -632,13 +631,13 @@ class _AssembleWrapperKernelBuilder:
                              "interior_facet_horiz": op2.ON_INTERIOR_FACETS}
         iteration_region = iteration_regions.get(self._integral_type, None)
 
-        return op2.WrapperKernel(self._kinfo.kernel,
-                                 wrapper_kernel_args,
-                                 iteration_region=iteration_region,
-                                 pass_layer_arg=self._kinfo.pass_layer_arg,
-                                 extruded=self.mesh.extruded,
-                                 constant_layers=not self.mesh.variable_layers,
-                                 subset=self._needs_subset)
+        return op2.GlobalKernel(self._kinfo.kernel,
+                                wrapper_kernel_args,
+                                iteration_region=iteration_region,
+                                pass_layer_arg=self._kinfo.pass_layer_arg,
+                                extruded=self.mesh.extruded,
+                                constant_layers=not self.mesh.variable_layers,
+                                subset=self._needs_subset)
 
     @property
     def _integral_type(self):
@@ -693,7 +692,7 @@ class _AssembleWrapperKernelBuilder:
         else:
             offset = None
 
-        map_arg = op2.MapWrapperKernelArg(arity, offset)
+        map_arg = op2.MapKernelArg(arity, offset)
         self._map_arg_cache[key] = map_arg
         return map_arg
 
@@ -728,25 +727,25 @@ class _AssembleWrapperKernelBuilder:
             subargs.append(self.make_arg(splitstuff))
 
         if len(elements) == 1:
-            return op2.MixedDatWrapperKernelArg(tuple(subargs))
+            return op2.MixedDatKernelArg(tuple(subargs))
         elif len(elements) == 2:
             e1, e2 = elements
             shape = len(e1.elements), len(e2.elements)
-            return op2.MixedMatWrapperKernelArg(tuple(subargs), shape)
+            return op2.MixedMatKernelArg(tuple(subargs), shape)
         else:
             raise AssertionError
 
     def _make_dat_wrapper_kernel_arg(self, finat_element):
         dim = self._get_dim(finat_element)
         map_arg = self._get_map_arg(finat_element)
-        return op2.DatWrapperKernelArg(dim, map_arg)
+        return op2.DatKernelArg(dim, map_arg)
 
     def _make_mat_wrapper_kernel_arg(self, relem, celem):
         # PyOP2 matrix objects have scalar dims
         rdim = (numpy.prod(self._get_dim(relem), dtype=int),)
         cdim = (numpy.prod(self._get_dim(celem), dtype=int),)
         map_args = self._get_map_arg(relem), self._get_map_arg(celem)
-        return op2.MatWrapperKernelArg(((rdim+cdim,),), map_args, unroll=self._unroll)
+        return op2.MatKernelArg(((rdim+cdim,),), map_args, unroll=self._unroll)
 
     @staticmethod
     def _get_map_id(finat_element):
@@ -777,7 +776,7 @@ def _as_wrapper_kernel_arg_output(_, self):
 
     # lower this
     if len(arguments) == 0:
-        return op2.GlobalWrapperKernelArg((1,))
+        return op2.GlobalKernelArg((1,))
 
     if self._diagonal:
         test, trial = arguments
@@ -791,7 +790,7 @@ def _as_wrapper_kernel_arg_output(_, self):
              if V.ufl_element().family() != "Real"]
 
     if len(elems) == 0:
-        return op2.GlobalWrapperKernelArg((1,))
+        return op2.GlobalKernelArg((1,))
 
     if any(isinstance(e, finat.EnrichedElement) and e.is_mixed for e in elems):
         return self.make_mixed_arg(elems)
@@ -812,7 +811,7 @@ def _as_wrapper_kernel_arg_coefficient(arg, self):
     ufl_element = coeff.ufl_element()
     
     if ufl_element.family() == "Real":
-        return op2.GlobalWrapperKernelArg((ufl_element.value_size(),))
+        return op2.GlobalKernelArg((ufl_element.value_size(),))
     else:
         finat_element = create_element(coeff.ufl_function_space().ufl_element())
         return self._make_dat_wrapper_kernel_arg(finat_element)
@@ -828,12 +827,12 @@ def _as_wrapper_kernel_arg_cell_sizes(_, self):
 
 @_as_wrapper_kernel_arg.register(kernel_args.ExteriorFacetKernelArg)
 def _as_wrapper_kernel_arg_exterior_facet(_, self):
-    return op2.DatWrapperKernelArg((1,))
+    return op2.DatKernelArg((1,))
 
 
 @_as_wrapper_kernel_arg.register(kernel_args.InteriorFacetKernelArg)
 def _as_wrapper_kernel_arg_interior_facet(_, self):
-    return op2.DatWrapperKernelArg((2,))
+    return op2.DatKernelArg((2,))
 
 
 @_as_wrapper_kernel_arg.register(CellFacetKernelArg)
@@ -844,7 +843,7 @@ def _as_wrapper_kernel_arg_cell_facet(_, self):
         num_facets = self.mesh._base_mesh.ufl_cell().num_facets()
     else:
         num_facets = self.mesh.ufl_cell().num_facets()
-    return op2.DatWrapperKernelArg((num_facets, 2))
+    return op2.DatKernelArg((num_facets, 2))
 
 
 @_as_wrapper_kernel_arg.register(kernel_args.CellOrientationsKernelArg)
@@ -858,7 +857,7 @@ def _as_wrapper_kernel_arg_cell_orientations(_, self):
 
 @_as_wrapper_kernel_arg.register(LayerCountKernelArg)
 def _as_wrapper_kernel_arg_layer_count(_, self):
-    return op2.GlobalWrapperKernelArg((1,))
+    return op2.GlobalKernelArg((1,))
 
 
 def _wrapper_kernel_cache_key(form, split_knl, all_integer_subdomain_ids, **kwargs):

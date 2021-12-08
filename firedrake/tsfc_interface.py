@@ -294,10 +294,7 @@ def gather_integer_subdomain_ids(knls):
 
 def as_pyop2_local_kernel(ast, name, arguments, access=op2.INC, **kwargs):
     """TODO"""
-    knl_args = []
-    for i, arg in enumerate(arguments):
-        # all but the first argument to the kernel are read-only
-        acc = access if i == 0 else op2.READ
-        knl_args.append(op2.LocalKernelArg(acc, arg.dtype))
-    return op2.Kernel(ast, name, knl_args,
+    # all but the first argument to the kernel are read-only
+    accesses = tuple([access] + [op2.READ]*len(arguments[1:]))
+    return op2.Kernel(ast, name, accesses=accesses,
                       requires_zeroed_output_arguments=True, **kwargs)

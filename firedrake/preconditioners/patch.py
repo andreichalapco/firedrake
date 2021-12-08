@@ -56,17 +56,17 @@ class LocalMatPack(LocalPack, MatPack):
                        True: "MatSetValues"}
 
 
-class LocalMatWrapperKernelArg(op2.MatWrapperKernelArg):
+class LocalMatKernelArg(op2.MatKernelArg):
 
     pack = LocalMatPack
 
 
-class LocalMatPayload(pyop2.legacy.MatPayload):
+class LocalMatLegacyArg(op2.MatLegacyArg):
 
     @property
-    def wrapper_kernel_arg(self):
-        map_args = [m.wrapper_kernel_arg for m in self.maps]
-        return LocalMatWrapperKernelArg(self.mat.dims, map_args, unroll=self.unroll)
+    def global_kernel_arg(self):
+        map_args = [m.global_kernel_arg for m in self.maps]
+        return LocalMatKernelArg(self.data.dims, map_args)
 
 
 class LocalMat(pyop2.types.AbstractMat):
@@ -75,8 +75,8 @@ class LocalMat(pyop2.types.AbstractMat):
         self._sparsity = DenseSparsity(dset, dset)
         self.dtype = numpy.dtype(PETSc.ScalarType)
 
-    def __call__(self, *args, **kwargs):
-        return LocalMatPayload(self, *args, **kwargs)
+    def __call__(self, access, maps):
+        return LocalMatLegacyArg(self, maps, access)
 
 
 class LocalDatPack(LocalPack, DatPack):
@@ -91,7 +91,7 @@ class LocalDatPack(LocalPack, DatPack):
             return None
 
 
-class LocalDatWrapperKernelArg(op2.DatWrapperKernelArg):
+class LocalDatKernelArg(op2.DatKernelArg):
 
     def __init__(self, *args, needs_mask, **kwargs):
         super().__init__(*args, **kwargs)
@@ -102,13 +102,13 @@ class LocalDatWrapperKernelArg(op2.DatWrapperKernelArg):
         return partial(LocalDatPack, self.needs_mask)
 
 
-class LocalDatPayload(pyop2.legacy.DatPayload):
+class LocalDatLegacyArg(op2.DatLegacyArg):
 
     @property
-    def wrapper_kernel_arg(self):
-        map_arg = self.map_.wrapper_kernel_arg if self.map_ is not None else None
-        return LocalDatWrapperKernelArg(self.dat.dataset.dim, map_arg,
-                                        needs_mask=self.dat.needs_mask)
+    def global_kernel_arg(self):
+        map_arg = self.map_.global_kernel_arg if self.map_ is not None else None
+        return LocalDatKernelArg(self.data.dataset.dim, map_arg,
+                                        needs_mask=self.data.needs_mask)
 
 
 class LocalDat(pyop2.types.AbstractDat):
@@ -123,7 +123,7 @@ class LocalDat(pyop2.types.AbstractDat):
         return super()._wrapper_cache_key_ + (self.needs_mask, )
 
     def __call__(self, access, map_=None):
-        return LocalDatPayload(self, access, map_)
+        return LocalDatLegacyArg(self, map_, access)
 
 
 register_petsc_function("MatSetValues")
@@ -214,8 +214,8 @@ def matrix_funptr(form, state):
 
         wrapper_knl_args = []
         for a in args:
-            wrapper_knl_args.append(a.wrapper_kernel_arg)
-        mod = op2.WrapperKernel(kinfo.kernel, wrapper_knl_args, subset=True)
+            wrapper_knl_args.append(a.global_kernel_arg)
+        mod = op2.GlobalKernel(kinfo.kernel, wrapper_knl_args, subset=True)
         kernels.append(CompiledKernel(mod.compile(iterset.comm), kinfo))
     return cell_kernels, int_facet_kernels
 
@@ -301,8 +301,8 @@ def residual_funptr(form, state):
             args.append(arg)
         iterset = op2.Subset(iterset, [])
 
-        wrapper_knl_args = [a.wrapper_kernel_arg for a in args]
-        mod = op2.WrapperKernel(kinfo.kernel, wrapper_knl_args, subset=True)
+        wrapper_knl_args = [a.global_kernel_arg for a in args]
+        mod = op2.GlobalKernel(kinfo.kernel, wrapper_knl_args, subset=True)
         kernels.append(CompiledKernel(mod.compile(iterset.comm), kinfo))
     return cell_kernels, int_facet_kernels
 

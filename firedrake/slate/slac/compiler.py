@@ -353,14 +353,15 @@ def generate_kernel_ast(builder, statements, declared_temps):
     # Eigen header files
     include_dirs = list(builder.include_dirs)
     include_dirs.append(EIGEN_INCLUDE_DIR)
+    flop_count = builder.expression_flops + builder.terminal_flops
     op2kernel = op2.Kernel(kernel_ast,
                            macro_kernel_name,
                            cpp=True,
                            include_dirs=include_dirs,
                            headers=['#include <Eigen/Dense>',
-                                    '#define restrict __restrict'])
+                                    '#define restrict __restrict'],
+                           flop_count=flop_count)
 
-    op2kernel.num_flops = builder.expression_flops + builder.terminal_flops
     # Send back a "TSFC-like" SplitKernel object with an
     # index and KernelInfo
     kinfo = KernelInfo(kernel=op2kernel,

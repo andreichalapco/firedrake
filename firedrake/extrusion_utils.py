@@ -71,8 +71,7 @@ def make_extruded_coords(extruded_topology, base_coords, ext_coords,
                      ext_coords.dat(op2.WRITE, ext_coords.cell_node_map()),
                      base_coords.dat(op2.READ, base_coords.cell_node_map()),
                      layer_height(op2.READ),
-                     pass_layer_arg=True,
-                     is_loopy_kernel=True)
+                     pass_layer_arg=True)
         return
     ext_fe = create_element(ext_coords.ufl_element())
     ext_shape = ext_fe.index_shape
@@ -226,8 +225,7 @@ def make_extruded_coords(extruded_topology, base_coords, ext_coords,
                  ext_coords.dat(op2.WRITE, ext_coords.cell_node_map()),
                  base_coords.dat(op2.READ, base_coords.cell_node_map()),
                  layer_height(op2.READ),
-                 pass_layer_arg=True,
-                 is_loopy_kernel=True)
+                 pass_layer_arg=True)
 
 
 def flat_entity_dofs(entity_dofs):

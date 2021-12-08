@@ -307,10 +307,10 @@ class LocalKernelBuilder(object):
 
                 # Subkernels for local assembly (Eigen templated functions)
                 from coffee.base import Node
-                assert isinstance(kinfo.kernel._code, Node)
-                kast = transformer.visit(kinfo.kernel._code)
+                assert isinstance(kinfo.kernel.code, Node)
+                kast = transformer.visit(kinfo.kernel.code)
                 templated_subkernels.append(kast)
-                include_dirs.extend(kinfo.kernel._include_dirs)
+                include_dirs.extend(kinfo.kernel.include_dirs)
                 oriented = oriented or kinfo.oriented
 
         # Add subdomain call to assembly dict

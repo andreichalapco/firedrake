@@ -653,11 +653,11 @@ def dg_injection_kernel(Vf, Vc, ncell):
     R = ast.Symbol("R")
     body.children.append(ast.FunCall(Ainv.name, R, coarse_builder.coordinates_arg.coffee_arg.sym, A))
     from coffee.base import Node
-    assert isinstance(Ainv._code, Node)
-    return op2.Kernel(ast.Node([Ainv._code,
+    assert isinstance(Ainv.code, Node)
+    return op2.Kernel(ast.Node([Ainv.code,
                                 ast.FunDecl("void", "pyop2_kernel_injection_dg", args, body,
                                             pred=["static", "inline"])]),
                       name="pyop2_kernel_injection_dg",
                       cpp=True,
-                      include_dirs=Ainv._include_dirs,
-                      headers=Ainv._headers)
+                      include_dirs=Ainv.include_dirs,
+                      headers=Ainv.headers)
