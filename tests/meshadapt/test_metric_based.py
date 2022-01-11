@@ -144,9 +144,9 @@ if __name__ == "__main__":  # TODO: Drop this eventually
 
     as well as these parameters, which are specific
     to Mmg and ParMmg:
-        -dm_plex_metric_no_insertion
-        -dm_plex_metric_no_swapping
-        -dm_plex_metric_no_movement
+        -dm_plex_metric_no_insert
+        -dm_plex_metric_no_swap
+        -dm_plex_metric_no_move
         -dm_plex_metric_gradation_factor <beta>
         -dm_plex_metric_verbosity <verbosity>
         -dm_plex_metric_num_iterations <niter>
