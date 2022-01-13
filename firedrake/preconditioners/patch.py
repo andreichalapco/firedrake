@@ -65,7 +65,7 @@ class LocalMatLegacyArg(op2.MatLegacyArg):
 
     @property
     def global_kernel_arg(self):
-        map_args = [m.global_kernel_arg for m in self.maps]
+        map_args = [m._global_kernel_arg for m in self.maps]
         return LocalMatKernelArg(self.data.dims, map_args)
 
 
@@ -106,7 +106,7 @@ class LocalDatLegacyArg(op2.DatLegacyArg):
 
     @property
     def global_kernel_arg(self):
-        map_arg = self.map_.global_kernel_arg if self.map_ is not None else None
+        map_arg = self.map_._global_kernel_arg if self.map_ is not None else None
         return LocalDatKernelArg(self.data.dataset.dim, map_arg,
                                         needs_mask=self.data.needs_mask)
 
