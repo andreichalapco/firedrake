@@ -179,7 +179,7 @@ class _SNESContext(object):
                  post_jacobian_callback=None, post_function_callback=None,
                  options_prefix=None,
                  transfer_manager=None):
-        from firedrake.assemble import AssemblyType, assemble
+        from firedrake.assemble import assemble
 
         if pmat_type is None:
             pmat_type = mat_type
@@ -239,7 +239,7 @@ class _SNESContext(object):
                                                     tensor=self._F,
                                                     bcs=self.bcs_F,
                                                     form_compiler_parameters=self.fcp,
-                                                    assembly_type=AssemblyType.RESIDUAL)
+                                                    zero_bc_nodes=True)
 
         self._jacobian_assembled = False
         self._splits = {}

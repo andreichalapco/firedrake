@@ -111,12 +111,12 @@ class LinearSolver(OptionsManager):
 
     @cached_property
     def _rhs(self):
-        from firedrake.assemble import AssemblyType, assemble
+        from firedrake.assemble import assemble
 
         u = function.Function(self.trial_space)
         b = function.Function(self.test_space)
         expr = -action(self.A.a, u)
-        return u, functools.partial(assemble, expr, tensor=b, assembly_type=AssemblyType.RESIDUAL), b
+        return u, functools.partial(assemble, expr, tensor=b, zero_bc_nodes=True), b
 
     def _lifted(self, b):
         u, update, blift = self._rhs

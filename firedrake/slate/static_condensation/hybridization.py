@@ -42,7 +42,7 @@ class HybridizationPC(SCBase):
         from firedrake import (FunctionSpace, Function, Constant,
                                TrialFunction, TrialFunctions, TestFunction,
                                DirichletBC, assemble)
-        from firedrake.assemble import allocate_matrix, AssemblyType
+        from firedrake.assemble import allocate_matrix
         from ufl.algorithms.replace import replace
 
         # Extract the problem context
@@ -210,7 +210,7 @@ class HybridizationPC(SCBase):
                                                 schur_rhs,
                                                 tensor=self.schur_rhs,
                                                 form_compiler_parameters=self.ctx.fc_params,
-                                                assembly_type=AssemblyType.RESIDUAL)
+                                                zero_bc_nodes=True)
 
         mat_type = PETSc.Options().getString(prefix + "mat_type", "aij")
         self.S = allocate_matrix(schur_comp, bcs=trace_bcs,
@@ -224,7 +224,7 @@ class HybridizationPC(SCBase):
                                              bcs=trace_bcs,
                                              form_compiler_parameters=self.ctx.fc_params,
                                              mat_type=mat_type,
-                                             assembly_type=AssemblyType.RESIDUAL)
+                                             zero_bc_nodes=True)
 
         with PETSc.Log.Event("HybridOperatorAssembly"):
             self._assemble_S()
@@ -277,7 +277,7 @@ class HybridizationPC(SCBase):
         """This generates the reconstruction calls for the unknowns using the
         Lagrange multipliers.
         """
-        from firedrake import AssemblyType, assemble
+        from firedrake import assemble
 
         # We always eliminate the velocity block first
         id0, id1 = (self.vidx, self.pidx)
@@ -316,7 +316,7 @@ class HybridizationPC(SCBase):
                                               u_rec,
                                               tensor=u,
                                               form_compiler_parameters=self.ctx.fc_params,
-                                              assembly_type=AssemblyType.RESIDUAL)
+                                              zero_bc_nodes=True)
 
         sigma_rec = A.solve(g - B * AssembledVector(u) - K_0.T * lambdar,
                             decomposition="PartialPivLU")
@@ -324,7 +324,7 @@ class HybridizationPC(SCBase):
                                                sigma_rec,
                                                tensor=sigma,
                                                form_compiler_parameters=self.ctx.fc_params,
-                                               assembly_type=AssemblyType.RESIDUAL)
+                                               zero_bc_nodes=True)
 
     @PETSc.Log.EventDecorator("HybridUpdate")
     def update(self, pc):
