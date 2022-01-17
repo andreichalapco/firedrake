@@ -698,49 +698,39 @@ class _GlobalKernelBuilder:
         else:
             return (1,)
 
-    def get_function_spaces(self, arguments):
-        indices = self._indices
-        if all(i is None for i in indices):
-            return tuple(a.ufl_function_space() for a in arguments)
-        elif all(i is not None for i in indices):
-            return tuple(a.ufl_function_space()[i] for i, a in zip(indices, arguments))
-        else:
-            raise AssertionError
+    @property
+    def _indexed_function_spaces(self):
+        return _FormHandler.index_function_spaces(self._form, self._indices)
 
-    def make_arg(self, elements):
-        if len(elements) == 1:
-            return self._make_dat_wrapper_kernel_arg(*elements)
-        elif len(elements) == 2:
-            return self._make_mat_wrapper_kernel_arg(*elements)
-        else:
-            raise AssertionError
+    def _make_dat_wrapper_kernel_arg(self, finat_element):
+        if isinstance(finat_element, finat.EnrichedElement) and finat_element.is_mixed:
+            subargs = []
+            subelements = lambda el: [e.element for e in el.elements]
+            for splitstuff in itertools.product(*[subelements(e) for e in elements]):
+                subargs.append(self._make_dat_wrapper_kernel_arg(splitstuff))
 
-    def make_mixed_arg(self, elements):
-        subargs = []
-        subelements = lambda el: [e.element for e in el.elements]
-        for splitstuff in itertools.product(*[subelements(e) for e in elements]):
-            subargs.append(self.make_arg(splitstuff))
-
-        if len(elements) == 1:
             return op2.MixedDatKernelArg(tuple(subargs))
-        elif len(elements) == 2:
+        else:
+            dim = self._get_dim(finat_element)
+            map_arg = self._get_map_arg(finat_element)
+            return op2.DatKernelArg(dim, map_arg)
+
+    def _make_mat_wrapper_kernel_arg(self, relem, celem):
+        if any(isinstance(e, finat.EnrichedElement) and e.is_mixed for e in {relem, celem}):
+            subargs = []
+            subelements = lambda el: [e.element for e in el.elements]
+            for splitstuff in itertools.product(*[subelements(e) for e in elements]):
+                subargs.append(self._make_mat_wrapper_kernel_arg(splitstuff))
+
             e1, e2 = elements
             shape = len(e1.elements), len(e2.elements)
             return op2.MixedMatKernelArg(tuple(subargs), shape)
         else:
-            raise AssertionError
-
-    def _make_dat_wrapper_kernel_arg(self, finat_element):
-        dim = self._get_dim(finat_element)
-        map_arg = self._get_map_arg(finat_element)
-        return op2.DatKernelArg(dim, map_arg)
-
-    def _make_mat_wrapper_kernel_arg(self, relem, celem):
-        # PyOP2 matrix objects have scalar dims
-        rdim = (numpy.prod(self._get_dim(relem), dtype=int),)
-        cdim = (numpy.prod(self._get_dim(celem), dtype=int),)
-        map_args = self._get_map_arg(relem), self._get_map_arg(celem)
-        return op2.MatKernelArg(((rdim+cdim,),), map_args, unroll=self._unroll)
+            # PyOP2 matrix objects have scalar dims
+            rdim = (numpy.prod(self._get_dim(relem), dtype=int),)
+            cdim = (numpy.prod(self._get_dim(celem), dtype=int),)
+            map_args = self._get_map_arg(relem), self._get_map_arg(celem)
+            return op2.MatKernelArg(((rdim+cdim,),), map_args, unroll=self._unroll)
 
     @staticmethod
     def _get_map_id(finat_element):
@@ -766,30 +756,30 @@ def _as_wrapper_kernel_arg(tsfc_arg, self):
 
 @_as_wrapper_kernel_arg.register(kernel_args.OutputKernelArg)
 def _as_wrapper_kernel_arg_output(_, self):
-    arguments = self._form.arguments()
+    rank = len(self._form.arguments())
+    Vs = self._indexed_function_spaces
 
-    # lower this
-    if len(arguments) == 0:
+    if rank == 0:
         return op2.GlobalKernelArg((1,))
-
-    if self._diagonal:
-        test, trial = arguments
-        arguments = test,
-
-    function_spaces = self.get_function_spaces(arguments)
-    # need to drop real elements here since they correspond to global blocks
-    # (and the data structure loses a rank)
-    elems = [create_element(V.ufl_element())
-             for V in function_spaces
-             if V.ufl_element().family() != "Real"]
-
-    if len(elems) == 0:
-        return op2.GlobalKernelArg((1,))
-
-    if any(isinstance(e, finat.EnrichedElement) and e.is_mixed for e in elems):
-        return self.make_mixed_arg(elems)
+    elif rank == 1 or rank == 2 and self._diagonal:
+        V, = Vs
+        if V.ufl_element().family() == "Real":
+            return op2.GlobalKernelArg((1,))
+        else:
+            return self._make_dat_wrapper_kernel_arg(create_element(V.ufl_element()))
+    elif rank == 2:
+        rel, cel = [create_element(V.ufl_element()) for V in Vs]
+        if all(V.ufl_element().family() == "Real" for V in Vs):
+            return op2.GlobalKernelArg((1,))
+        elif any(V.ufl_element().family() == "Real" for V in Vs):
+            el, = (el for el in {rel, cel} if not isinstance(el, finat.Real))
+            return self._make_dat_wrapper_kernel_arg(el)
+        else:
+            return self._make_mat_wrapper_kernel_arg(rel, cel)
     else:
-        return self.make_arg(elems)
+        raise AssertionError
+
+    return self.make_arg(elems)
 
 
 @_as_wrapper_kernel_arg.register(kernel_args.CoordinatesKernelArg)
@@ -917,27 +907,17 @@ class ParloopBuilder:
             return mesh.measure_set(self._kinfo.integral_type, self._kinfo.subdomain_id,
                                     self._all_integer_subdomain_ids)
 
-    def rank1stuff(self, tensor, function_space):
-        if function_space.ufl_element().family() == "Real":
-            return op2.GlobalParloopArg(tensor)
-        else:
-            return op2.DatParloopArg(tensor, self._get_map(function_space))
+    @property
+    def _indices(self):
+        return self._split_knl.indices
 
-    def rank2stuff(self, tensor, Vrow, Vcol):
-        if Vrow.ufl_element().family() == "Real":
-            if Vcol.ufl_element().family() == "Real":
-                return op2.GlobalParloopArg(tensor.handle.getPythonContext().global_)
-            else:
-                mp = self._get_map(Vcol)
-                return op2.DatParloopArg(tensor.handle.getPythonContext().dat, mp)
-        else:
-            if Vcol.ufl_element().family() == "Real":
-                mp = self._get_map(Vrow)
-                return op2.DatParloopArg(tensor.handle.getPythonContext().dat, mp)
-            else:
-                rmap = self._get_map(Vrow)
-                cmap = self._get_map(Vcol)
-                return op2.MatParloopArg(tensor, (rmap, cmap), lgmaps=self._lgmaps)
+    @property
+    def indexed_function_spaces(self):
+        return _FormHandler.index_function_spaces(self._form, self._indices)
+
+    @property
+    def indexed_tensor(self):
+        return _FormHandler.index_tensor(self._tensor, self._form, self._indices, self._diagonal)
 
 
 # TODO Make into a singledispatchmethod when we have Python 3.8
@@ -951,41 +931,31 @@ def _as_parloop_arg(tsfc_arg, self):
 
 @_as_parloop_arg.register(kernel_args.OutputKernelArg)
 def _as_parloop_arg_output(_, self):
-    arguments = self._form.arguments()
+    rank = len(self._form.arguments())
+    tensor = self.indexed_tensor
+    Vs = self.indexed_function_spaces
 
-    if len(arguments) == 0:
-        return op2.GlobalParloopArg(self._tensor)
-
-    if self._diagonal:
-        test, _ = arguments
-        arguments = test,
-
-    indices = self._split_knl.indices
-
-    if any(i is not None for i in indices):
-        assert all(i is not None for i in indices)
-
-        func_spaces = [a.ufl_function_space()[idx] for idx, a in zip(indices, arguments)]
-
-        if len(arguments) == 1:
-            i, = indices
-            V, = func_spaces
-            return self.rank1stuff(self._tensor.dat[i], V)
-        elif len(arguments) == 2:
-            i, j = indices
-            return self.rank2stuff(self._tensor.M[i, j], *func_spaces)
+    if rank == 0:
+        return op2.GlobalParloopArg(tensor)
+    elif rank == 1 or rank == 2 and self._diagonal:
+        V, = Vs
+        if V.ufl_element().family() == "Real":
+            return op2.GlobalParloopArg(tensor)
         else:
-            raise AssertionError
+            return op2.DatParloopArg(tensor, self._get_map(V))
+    elif rank == 2:
+        rmap, cmap = [self._get_map(V) for V in Vs]
+
+        if all(V.ufl_element().family() == "Real" for V in Vs):
+            assert rmap is None and cmap is None
+            return op2.GlobalParloopArg(tensor.handle.getPythonContext().global_)
+        elif any(V.ufl_element().family() == "Real" for V in Vs):
+            m = rmap or cmap
+            return op2.DatParloopArg(tensor.handle.getPythonContext().dat, m)
+        else:
+            return op2.MatParloopArg(tensor, (rmap, cmap), lgmaps=self._lgmaps)
     else:
-        func_spaces = [a.ufl_function_space() for a in arguments]
-
-        if len(arguments) == 1:
-            V, = func_spaces
-            return self.rank1stuff(self._tensor.dat, V)
-        elif len(arguments) == 2:
-            return self.rank2stuff(self._tensor.M, *func_spaces)
-        else:
-            raise AssertionError
+        raise AssertionError
 
 
 @_as_parloop_arg.register(kernel_args.CoordinatesKernelArg)
@@ -1045,3 +1015,32 @@ def iter_active_coefficients(form, kinfo):
     for idx, subidxs in kinfo.coefficient_map:
         for subidx in subidxs:
             yield form.coefficients()[idx].split()[subidx]
+
+
+class _FormHandler:
+
+    @staticmethod
+    def index_function_spaces(form, indices):
+        arguments = form.arguments()
+        if all(i is None for i in indices):
+            return tuple(a.ufl_function_space() for a in arguments)
+        elif all(i is not None for i in indices):
+            return tuple(a.ufl_function_space()[i] for i, a in zip(indices, arguments))
+        else:
+            raise AssertionError
+
+    @staticmethod
+    def index_tensor(tensor, form, indices, diagonal):
+        rank = len(form.arguments())
+        is_indexed = any(i is not None for i in indices)
+
+        if rank == 0:
+            return tensor
+        elif rank == 1 or rank == 2 and diagonal:
+            i, = indices
+            return tensor.dat[i] if is_indexed else tensor.dat
+        elif rank == 2:
+            i, j = indices
+            return tensor.M[i, j] if is_indexed else tensor.M
+        else:
+            raise AssertionError
