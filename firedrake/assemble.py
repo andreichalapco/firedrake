@@ -321,7 +321,7 @@ class FormAssembler(abc.ABC):
 
     def assemble(self):
         for parloop in self.parloops:
-            parloop.run()
+            parloop()
 
         for bc in self._bcs:
             if isinstance(bc, EquationBC):  # can this be lifted?
@@ -368,9 +368,9 @@ class FormAssembler(abc.ABC):
 
     @cached_property
     def parloops(self):
-        return tuple(ParloopExecutor(self._form, tknl, knl, self.all_integer_subdomain_ids,
-                                     tensor=self._tensor, diagonal=self.diagonal,
-                                     lgmaps=self.collect_lgmaps(tknl, self._bcs))
+        return tuple(ParloopBuilder(self._form, tknl, knl, self.all_integer_subdomain_ids,
+                                    tensor=self._tensor, diagonal=self.diagonal,
+                                    lgmaps=self.collect_lgmaps(tknl, self._bcs)).build()
                      for tknl, knl in zip(self.local_kernels, self.global_kernels))
 
     def needs_unrolling(self, knl, bcs):
@@ -557,6 +557,39 @@ def _get_mat_type(mat_type, sub_mat_type, arguments):
     return mat_type, sub_mat_type
 
 
+def _global_kernel_cache_key(form, split_knl, all_integer_subdomain_ids, **kwargs):
+    # N.B. Generating the global kernel is not a collective operation so the
+    # communicator does not need to be a part of this cache key.
+
+    if isinstance(form, ufl.Form):
+        sig = form.signature()
+    elif isinstance(form, slate.TensorBase):
+        sig = form.expression_hash
+
+    # The form signature does not store this information. This should be accessible from
+    # the UFL so we don't need this nasty hack.
+    subdomain_key = []
+    for val in form.subdomain_data().values():
+        for k, v in val.items():
+            if v is not None:
+                extruded = v._extruded
+                constant_layers = extruded and v.constant_layers
+                subset = isinstance(v, op2.Subset)
+                subdomain_key.append((k, extruded, constant_layers, subset))
+            else:
+                subdomain_key.append((k,))
+
+    return ((sig,)
+            + tuple(subdomain_key)
+            + tuplify(all_integer_subdomain_ids)
+            + cachetools.keys.hashkey(split_knl, **kwargs))
+
+
+@cachetools.cached(cache={}, key=_global_kernel_cache_key)
+def _make_global_kernel(*args, **kwargs):
+    return _GlobalKernelBuilder(*args, **kwargs).build()
+
+
 class _GlobalKernelBuilder:
 
     def __init__(self, form, split_knl, all_integer_subdomain_ids, diagonal=False, unroll=False):
@@ -626,6 +659,13 @@ class _GlobalKernelBuilder:
         return _as_wrapper_kernel_arg(tsfc_arg, self)
 
     def _get_map_arg(self, finat_element):
+        """Get the appropriate map argument for the given FInAT element.
+
+        :arg finat_element: A FInAT element.
+        :returns: A :class:`op2.MapKernelArg` instance corresponding to
+            the given FInAT element. This function uses a cache to ensure
+            that PyOP2 knows when it can reuse maps.
+        """
         key = self._get_map_id(finat_element)
 
         try:
@@ -669,12 +709,11 @@ class _GlobalKernelBuilder:
 
     def make_arg(self, elements):
         if len(elements) == 1:
-            func = self._make_dat_wrapper_kernel_arg
+            return self._make_dat_wrapper_kernel_arg(*elements)
         elif len(elements) == 2:
-            func = self._make_mat_wrapper_kernel_arg
+            return self._make_mat_wrapper_kernel_arg(*elements)
         else:
             raise AssertionError
-        return func(*[e for e in elements])
 
     def make_mixed_arg(self, elements):
         subargs = []
@@ -713,7 +752,6 @@ class _GlobalKernelBuilder:
             finat_element = finat_element.base_element
 
         real_tensorproduct = eutils.is_real_tensor_product_element(finat_element)
-
         try:
             eperm_key = entity_permutations_key(finat_element.entity_permutations)
         except NotImplementedError:
@@ -756,16 +794,14 @@ def _as_wrapper_kernel_arg_output(_, self):
 
 @_as_wrapper_kernel_arg.register(kernel_args.CoordinatesKernelArg)
 def _as_wrapper_kernel_arg_coordinates(_, self):
-    domain = self.mesh
-    finat_element = create_element(domain.ufl_coordinate_element())
+    finat_element = create_element(self.mesh.ufl_coordinate_element())
     return self._make_dat_wrapper_kernel_arg(finat_element)
 
 
 @_as_wrapper_kernel_arg.register(kernel_args.CoefficientKernelArg)
-def _as_wrapper_kernel_arg_coefficient(arg, self):
+def _as_wrapper_kernel_arg_coefficient(_, self):
     coeff = next(self._active_coefficients)
     ufl_element = coeff.ufl_element()
-    
     if ufl_element.family() == "Real":
         return op2.GlobalKernelArg((ufl_element.value_size(),))
     else:
@@ -775,7 +811,7 @@ def _as_wrapper_kernel_arg_coefficient(arg, self):
 
 @_as_wrapper_kernel_arg.register(kernel_args.CellSizesKernelArg)
 def _as_wrapper_kernel_arg_cell_sizes(_, self):
-    # mirror logic in TSFC set_cell_sizes
+    # this mirrors tsfc.kernel_interface.firedrake_loopy.KernelBuilder.set_cell_sizes
     ufl_element = ufl.FiniteElement("P", self.mesh.ufl_cell(), 1)
     finat_element = create_element(ufl_element)
     return self._make_dat_wrapper_kernel_arg(finat_element)
@@ -793,9 +829,7 @@ def _as_wrapper_kernel_arg_interior_facet(_, self):
 
 @_as_wrapper_kernel_arg.register(CellFacetKernelArg)
 def _as_wrapper_kernel_arg_cell_facet(_, self):
-    # TODO Share this functionality with Slate kernel_builder.py
     if self.mesh.extruded:
-        # TODO This is not sufficiently stripped
         num_facets = self.mesh._base_mesh.ufl_cell().num_facets()
     else:
         num_facets = self.mesh.ufl_cell().num_facets()
@@ -804,8 +838,7 @@ def _as_wrapper_kernel_arg_cell_facet(_, self):
 
 @_as_wrapper_kernel_arg.register(kernel_args.CellOrientationsKernelArg)
 def _as_wrapper_kernel_arg_cell_orientations(_, self):
-    # this is taken largely from mesh.py where we observe that the function space is
-    # DG0.
+    # this mirrors firedrake.mesh.MeshGeometry.init_cell_orientations
     ufl_element = ufl.FiniteElement("DG", cell=self._form.ufl_domain().ufl_cell(), degree=0)
     finat_element = create_element(ufl_element)
     return self._make_dat_wrapper_kernel_arg(finat_element)
@@ -816,40 +849,7 @@ def _as_wrapper_kernel_arg_layer_count(_, self):
     return op2.GlobalKernelArg((1,))
 
 
-def _global_kernel_cache_key(form, split_knl, all_integer_subdomain_ids, **kwargs):
-    # N.B. Generating the global kernel is not a collective operation so the
-    # communicator does not need to be a part of this cache key.
-
-    if isinstance(form, ufl.Form):
-        sig = form.signature()
-    elif isinstance(form, slate.TensorBase):
-        sig = form.expression_hash
-
-    # The form signature does not store this information. This should be accessible from
-    # the UFL so we don't need this nasty hack.
-    subdomain_key = []
-    for val in form.subdomain_data().values():
-        for k, v in val.items():
-            if v is not None:
-                extruded = v._extruded
-                constant_layers = extruded and v.constant_layers
-                subset = isinstance(v, op2.Subset)
-                subdomain_key.append((k, extruded, constant_layers, subset))
-            else:
-                subdomain_key.append((k,))
-
-    return ((sig,)
-            + tuple(subdomain_key)
-            + tuplify(all_integer_subdomain_ids)
-            + cachetools.keys.hashkey(split_knl, **kwargs))
-
-
-@cachetools.cached(cache={}, key=_global_kernel_cache_key)
-def _make_global_kernel(*args, **kwargs):
-    return _GlobalKernelBuilder(*args, **kwargs).build()
-
-
-class ParloopExecutor:
+class ParloopBuilder:
 
     def __init__(self, form, split_knl, knl, all_integer_subdomain_ids, *, tensor=None, diagonal=False, lgmaps=None):
         """
@@ -868,24 +868,20 @@ class ParloopExecutor:
         self._diagonal = diagonal
         self._lgmaps = lgmaps
 
-        self._iterset = self._get_iterset()
-
-    def run(self):
-        kinfo = self._split_knl.kinfo
-
+    def build(self):
         parloop_args = [_as_parloop_arg(tsfc_arg, self)
                         for tsfc_arg in self._split_knl.kinfo.arguments]
         try:
-            op2.parloop(self._knl, self._iterset, parloop_args)
+            return op2.Parloop(self._knl, self._iterset, parloop_args)
         except MapValueError:
             raise RuntimeError("Integral measure does not match measure of all "
                                "coefficients/arguments")
 
-    @functools.cached_property
+    @cached_property
     def _active_coefficients(self):
         return iter_active_coefficients(self._form, self._kinfo)
 
-    @functools.cached_property
+    @cached_property
     def mesh(self):
         return self._form.ufl_domains()[self._kinfo.domain_number]
 
@@ -894,12 +890,11 @@ class ParloopExecutor:
         return self._kinfo.integral_type
 
     def _get_map(self, V):
-        """TODO"""
+        """Return the appropriate PyOP2 map for a given function space."""
         assert isinstance(V, ufl.FunctionSpace)
 
         if self._integral_type in {"cell", "exterior_facet_top",
-                                  "exterior_facet_bottom",
-                                  "interior_facet_horiz"}:
+                                   "exterior_facet_bottom", "interior_facet_horiz"}:
             return V.cell_node_map()
         elif self._integral_type in {"exterior_facet", "exterior_facet_vert"}:
             return V.exterior_facet_node_map()
@@ -908,7 +903,8 @@ class ParloopExecutor:
         else:
             raise AssertionError
 
-    def _get_iterset(self):
+    @cached_property
+    def _iterset(self):
         mesh = self._form.ufl_domains()[self._kinfo.domain_number]
         subdomain_data = self._form.subdomain_data()[mesh].get(self._kinfo.integral_type, None)
         if subdomain_data is not None:
@@ -921,11 +917,11 @@ class ParloopExecutor:
             return mesh.measure_set(self._kinfo.integral_type, self._kinfo.subdomain_id,
                                     self._all_integer_subdomain_ids)
 
-    def rank1stuff(self, dat, V):
-        if V.ufl_element().family() == "Real":
-            return op2.GlobalParloopArg(dat)
+    def rank1stuff(self, tensor, function_space):
+        if function_space.ufl_element().family() == "Real":
+            return op2.GlobalParloopArg(tensor)
         else:
-            return op2.DatParloopArg(dat, self._get_map(V))
+            return op2.DatParloopArg(tensor, self._get_map(function_space))
 
     def rank2stuff(self, tensor, Vrow, Vcol):
         if Vrow.ufl_element().family() == "Real":
@@ -1040,12 +1036,12 @@ def _as_parloop_arg_cell_facet(_, self):
 
 @_as_parloop_arg.register(LayerCountKernelArg)
 def _as_parloop_arg_layer_count(_, self):
-    glob = op2.Global((1,), self._iterset.layers-2,
-                      dtype=numpy.int32)
+    glob = op2.Global((1,), self._iterset.layers-2, dtype=numpy.int32)
     return op2.GlobalParloopArg(glob)
 
 
 def iter_active_coefficients(form, kinfo):
+    """Yield the form coefficients referenced in ``kinfo``."""
     for idx, subidxs in kinfo.coefficient_map:
         for subidx in subidxs:
             yield form.coefficients()[idx].split()[subidx]
