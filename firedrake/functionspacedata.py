@@ -16,7 +16,6 @@ vs VectorElement) can share the PyOP2 Set and Map data.
 
 import numpy
 import ufl
-import FIAT
 import finat
 from decorator import decorator
 from functools import partial

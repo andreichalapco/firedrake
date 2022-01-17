@@ -108,7 +108,7 @@ class LocalDatLegacyArg(op2.DatLegacyArg):
     def global_kernel_arg(self):
         map_arg = self.map_._global_kernel_arg if self.map_ is not None else None
         return LocalDatKernelArg(self.data.dataset.dim, map_arg,
-                                        needs_mask=self.data.needs_mask)
+                                 needs_mask=self.data.needs_mask)
 
 
 class LocalDat(pyop2.types.AbstractDat):

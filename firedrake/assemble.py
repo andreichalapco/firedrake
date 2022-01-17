@@ -1,6 +1,5 @@
 import abc
 from collections import OrderedDict
-from enum import IntEnum, auto
 import functools
 from functools import cached_property
 import itertools
@@ -25,7 +24,6 @@ from firedrake.slate.slac.kernel_builder import CellFacetKernelArg, LayerCountKe
 from firedrake.utils import ScalarType, tuplify
 from pyop2 import op2
 from pyop2.exceptions import MapValueError, SparsityFormatError
-from pyop2.mpi import dup_comm
 
 
 __all__ = "assemble",
@@ -237,13 +235,6 @@ def _assemble_form(form, tensor=None, bcs=None, *,
 
     See :func:`assemble` for a description of the arguments to this function.
     """
-    # Ensure mesh is 'initialised' as we could have got here without building a
-    # function space (e.g. if integrating a constant).
-    for mesh in form.ufl_domains():
-        mesh.init()
-
-    bcs = solving._extract_bcs(bcs)
-
     rank = len(form.arguments())
     if rank == 0:
         if len(form.arguments()) != 0:
@@ -265,7 +256,6 @@ def _assemble_form(form, tensor=None, bcs=None, *,
         if tensor is not None:
             if test.function_space() != tensor.function_space():
                 raise ValueError("Form's argument does not match provided result tensor")
-            tensor.dat.zero()
         else:
             tensor = firedrake.Function(test.function_space())
         return OneFormAssembler(form, tensor, bcs, diagonal, zero_bc_nodes,
@@ -285,7 +275,6 @@ def _assemble_form(form, tensor=None, bcs=None, *,
         if isinstance(tensor, matrix.ImplicitMatrix):
             return MatrixFreeAssembler(tensor).assemble()
         else:
-            tensor.M.zero()
             return TwoFormAssembler(form, tensor, bcs, form_compiler_parameters).assemble()
     else:
         raise AssertionError
@@ -299,15 +288,22 @@ class FormAssembler(abc.ABC):
     :param bcs: Iterable of boundary conditions to apply.
     :param form_compiler_parameters: Optional parameters to pass to the
         TSFC and/or Slate compilers.
+    :param needs_zeroing: Should ``tensor`` be zeroed before assembling?
     """
 
-    def __init__(self, form, tensor, bcs=(), form_compiler_parameters=None):
+    def __init__(self, form, tensor, bcs=(), form_compiler_parameters=None, needs_zeroing=True):
         assert tensor is not None
+
+        # Ensure mesh is 'initialised' as we could have got here without building a
+        # function space (e.g. if integrating a constant).
+        for mesh in form.ufl_domains():
+            mesh.init()
 
         self._form = form
         self._tensor = tensor
-        self._bcs = bcs
+        self._bcs = solving._extract_bcs(bcs)
         self._form_compiler_params = form_compiler_parameters or {}
+        self._needs_zeroing = needs_zeroing
 
     @property
     @abc.abstractmethod
@@ -319,11 +315,18 @@ class FormAssembler(abc.ABC):
     def diagonal(self):
         """Are we assembling the diagonal of a 2-form?"""
 
+    @abc.abstractmethod
+    def zero_tensor(self):
+        """Set ``tensor`` to zero."""
+
     def assemble(self):
         """Perform the assembly.
 
         :returns: The assembled object.
         """
+        if self._needs_zeroing:
+            self.zero_tensor()
+
         for parloop in self.parloops:
             parloop()
 
@@ -364,7 +367,6 @@ class FormAssembler(abc.ABC):
                                          diagonal=self.diagonal,
                                          unroll=self.needs_unrolling(tsfc_knl, self._bcs))
                      for tsfc_knl in self.local_kernels)
-
 
     @cached_property
     def parloops(self):
@@ -409,6 +411,9 @@ class ZeroFormAssembler(FormAssembler):
     def result(self):
         return self._tensor.data[0]
 
+    def zero_tensor(self):
+        self._tensor.zero()
+
 
 class OneFormAssembler(FormAssembler):
     """Class for assembling a 1-form.
@@ -421,9 +426,9 @@ class OneFormAssembler(FormAssembler):
     For all other arguments see :class:`FormAssembler` for more information.
     """
 
-    def __init__(self, form, tensor, bcs, diagonal=False,
-                 zero_bc_nodes=False, form_compiler_parameters=None):
-        super().__init__(form, tensor, bcs, form_compiler_parameters)
+    def __init__(self, form, tensor, bcs=(), diagonal=False, zero_bc_nodes=False,
+                 form_compiler_parameters=None, needs_zeroing=True):
+        super().__init__(form, tensor, bcs, form_compiler_parameters, needs_zeroing)
         self._diagonal = diagonal
         self._zero_bc_nodes = zero_bc_nodes
 
@@ -435,6 +440,9 @@ class OneFormAssembler(FormAssembler):
     def result(self):
         return self._tensor
 
+    def zero_tensor(self):
+        self._tensor.dat.zero()
+
     def _apply_bc(self, bc):
         # TODO Maybe this could be a singledispatchmethod?
         if isinstance(bc, DirichletBC):
@@ -444,8 +452,8 @@ class OneFormAssembler(FormAssembler):
                 raise NotImplementedError("Diagonal assembly and EquationBC not supported")
             bc.zero(self._tensor)
 
-            type(self)(bc.f, self._tensor, bc.bcs, self._diagonal,
-                       self._zero_bc_nodes, self._form_compiler_params).assemble()
+            type(self)(bc.f, self._tensor, bc.bcs, self._diagonal, self._zero_bc_nodes,
+                       self._form_compiler_params, needs_zeroing=False).assemble()
         else:
             raise AssertionError
 
@@ -459,11 +467,21 @@ class OneFormAssembler(FormAssembler):
             bc.zero(self._tensor)
 
 
-class TwoFormAssembler(FormAssembler):
+def TwoFormAssembler(form, tensor, *args, **kwargs):
+    if isinstance(tensor, matrix.ImplicitMatrix):
+        return MatrixFreeAssembler(tensor)
+    else:
+        return ExplicitMatrixAssembler(form, tensor, *args, **kwargs)
+
+
+class ExplicitMatrixAssembler(FormAssembler):
     """Class for assembling a 2-form."""
 
     diagonal = False
     """Diagonal assembly not possible for two forms."""
+
+    def zero_tensor(self):
+        self._tensor.M.zero()
 
     @property
     def test_function_space(self):
@@ -524,7 +542,8 @@ class TwoFormAssembler(FormAssembler):
         if isinstance(bc, DirichletBC):
             self._apply_dirichlet_bc(bc)
         elif isinstance(bc, EquationBCSplit):
-            type(self)(bc.f, self._tensor, bc.bcs, self._form_compiler_params).assemble()
+            type(self)(bc.f, self._tensor, bc.bcs, self._form_compiler_params,
+                       needs_zeroing=False).assemble()
         else:
             raise AssertionError
 

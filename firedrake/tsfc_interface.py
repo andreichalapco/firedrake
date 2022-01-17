@@ -167,6 +167,7 @@ ebugging.
 SplitKernel = collections.namedtuple("SplitKernel", ["indices",
                                                      "kinfo"])
 
+
 @PETSc.Log.EventDecorator()
 def compile_form(form, name, parameters=None, split=True, interface=None, coffee=False, diagonal=False):
     """Compile a form using TSFC.
