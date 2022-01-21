@@ -29,6 +29,10 @@ from pyop2.exceptions import MapValueError, SparsityFormatError
 __all__ = "assemble",
 
 
+_FORM_CACHE_KEY = "firedrake.assemble.FormAssembler"
+"""Entry used in form cache to try and reuse assemblers where possible."""
+
+
 @PETSc.Log.EventDecorator()
 @annotate_assemble
 def assemble(expr, *args, **kwargs):
@@ -61,9 +65,6 @@ def assemble(expr, *args, **kwargs):
     :kwarg appctx: Additional information to hang on the assembled
         matrix if an implicit matrix is requested (mat_type ``"matfree"``).
     :kwarg options_prefix: PETSc options prefix to apply to matrices.
-    :kwarg zero_bc_nodes: If ``True``, set the boundary condition nodes in the
-        output tensor to zero rather than to the values prescribed by the
-        boundary condition.
 
     :returns: See below.
 
@@ -102,16 +103,8 @@ def assemble(expr, *args, **kwargs):
 
 
 @PETSc.Log.EventDecorator()
-def allocate_matrix(
-    expr,
-    bcs=None,
-    *,
-    mat_type=None,
-    sub_mat_type=None,
-    appctx=None,
-    form_compiler_parameters=None,
-    options_prefix=None
-):
+def allocate_matrix(expr, bcs=None, *, mat_type=None, sub_mat_type=None,
+                    appctx=None, form_compiler_parameters=None, options_prefix=None):
     r"""Allocate a matrix given an expression.
 
     .. warning::
@@ -209,18 +202,22 @@ def create_assembly_callable(expr, tensor=None, bcs=None, form_compiler_paramete
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter("once", DeprecationWarning)
-        warnings.warn("create_assembly_callable is now deprecated. Please use assemble instead.",
+        warnings.warn("create_assembly_callable is now deprecated. Please use assemble or FormAssembler instead.",
                       DeprecationWarning)
 
     if tensor is None:
         raise ValueError("Have to provide tensor to write to")
-    return functools.partial(assemble, expr,
-                             tensor=tensor,
-                             bcs=bcs,
-                             form_compiler_parameters=form_compiler_parameters,
-                             mat_type=mat_type,
-                             sub_mat_type=sub_mat_type,
-                             diagonal=diagonal)
+
+    rank = len(expr.arguments())
+    if rank == 0:
+        return ZeroFormAssembler(expr, tensor, form_compiler_parameters).assemble
+    elif rank == 1 or (rank == 2 and diagonal):
+        return OneFormAssembler(expr, tensor, bcs, diagonal=diagonal,
+                                form_compiler_parameters=form_compiler_parameters).assemble
+    elif rank == 2:
+        return TwoFormAssembler(expr, tensor, bcs, form_compiler_parameters).assemble
+    else:
+        raise AssertionError
 
 
 def _assemble_form(form, tensor=None, bcs=None, *,
@@ -229,12 +226,20 @@ def _assemble_form(form, tensor=None, bcs=None, *,
                    sub_mat_type=None,
                    appctx=None,
                    options_prefix=None,
-                   zero_bc_nodes=False,
                    form_compiler_parameters=None):
     """Assemble a form.
 
     See :func:`assemble` for a description of the arguments to this function.
     """
+    # we can disregard mat_type etc in the cache key since these only matter if tensor is None
+    key = bcs, diagonal, form_compiler_parameters
+    try:
+        old_key, old_tensor, assembler = form._cache[_FORM_CACHE_KEY]
+        if old_key == key and old_tensor is tensor:
+            return assembler.assemble()
+    except KeyError:
+        pass
+
     rank = len(form.arguments())
     if rank == 0:
         if len(form.arguments()) != 0:
@@ -243,7 +248,7 @@ def _assemble_form(form, tensor=None, bcs=None, *,
         assert not bcs
 
         tensor = op2.Global(1, [0.0], dtype=utils.ScalarType)
-        return ZeroFormAssembler(form, tensor, form_compiler_parameters).assemble()
+        assembler = ZeroFormAssembler(form, tensor, form_compiler_parameters)
     elif rank == 1 or (rank == 2 and diagonal):
         if diagonal:
             test, trial = form.arguments()
@@ -258,8 +263,7 @@ def _assemble_form(form, tensor=None, bcs=None, *,
                 raise ValueError("Form's argument does not match provided result tensor")
         else:
             tensor = firedrake.Function(test.function_space())
-        return OneFormAssembler(form, tensor, bcs, diagonal, zero_bc_nodes,
-                                form_compiler_parameters).assemble()
+        assembler = OneFormAssembler(form, tensor, bcs, diagonal, form_compiler_parameters)
     elif rank == 2:
         if tensor is not None:
             if tensor.a.arguments() != form.arguments():
@@ -273,11 +277,14 @@ def _assemble_form(form, tensor=None, bcs=None, *,
                                      options_prefix=options_prefix)
 
         if isinstance(tensor, matrix.ImplicitMatrix):
-            return MatrixFreeAssembler(tensor).assemble()
+            assembler = MatrixFreeAssembler(tensor)
         else:
-            return TwoFormAssembler(form, tensor, bcs, form_compiler_parameters).assemble()
+            assembler = TwoFormAssembler(form, tensor, bcs, form_compiler_parameters)
     else:
         raise AssertionError
+
+    form._cache[_FORM_CACHE_KEY] = key, tensor, assembler
+    return assembler.assemble()
 
 
 class FormAssembler(abc.ABC):
