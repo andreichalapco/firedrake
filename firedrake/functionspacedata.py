@@ -399,16 +399,18 @@ class FunctionSpaceData(object):
 
     @PETSc.Log.EventDecorator()
     def __init__(self, mesh, ufl_element):
+        if type(ufl_element) is ufl.MixedElement:
+            raise ValueError("Can't create FunctionSpace for MixedElement")
+
         finat_element = create_element(ufl_element)
         real_tensorproduct = eutils.is_real_tensor_product_element(finat_element)
-        if isinstance(finat_element, finat.EnrichedElement) and finat_element.is_mixed:
-            raise ValueError("Can't create FunctionSpace for MixedElement")
         entity_dofs = finat_element.entity_dofs()
         nodes_per_entity = tuple(mesh.make_dofs_per_plex_entity(entity_dofs))
         try:
             entity_permutations = finat_element.entity_permutations
         except NotImplementedError:
             entity_permutations = None
+
         # Create the PetscSection mapping topological entities to functionspace nodes
         # For non-scalar valued function spaces, there are multiple dofs per node.
         key = (nodes_per_entity, real_tensorproduct)
@@ -426,12 +428,12 @@ class FunctionSpaceData(object):
         # conditions.
         # Map caches are specific to a cell_node_list, which is keyed by entity_dof
         self.map_cache = get_map_cache(mesh, (edofs_key, real_tensorproduct, eperm_key))
-        # TODO This is quite a janky way to check this. Could just look at type(mesh) or
-        # the ufl domain if I add the right metadata.
+
         if isinstance(mesh, mesh_mod.ExtrudedMeshTopology):
             self.offset = eutils.calculate_dof_offset(finat_element)
         else:
             self.offset = None
+
         self.entity_node_lists = get_entity_node_lists(mesh, (edofs_key, real_tensorproduct, eperm_key), entity_dofs, entity_permutations, global_numbering, self.offset)
         self.node_set = node_set
         self.cell_boundary_masks = get_boundary_masks(mesh, (edofs_key, "cell"), finat_element)

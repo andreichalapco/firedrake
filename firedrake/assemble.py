@@ -293,6 +293,11 @@ class FormAssembler(abc.ABC):
 
     def __init__(self, form, tensor, bcs=(), form_compiler_parameters=None, needs_zeroing=True):
         assert tensor is not None
+        bcs = solving._extract_bcs(bcs)
+
+        if any(isinstance(bc, EquationBC) for bc in bcs):
+            raise TypeError("EquationBC objects not expected here. "
+                            "Preprocess by extracting the appropriate form with bc.extract_form('Jp') or bc.extract_form('J')")
 
         # Ensure mesh is 'initialised' as we could have got here without building a
         # function space (e.g. if integrating a constant).
@@ -301,7 +306,7 @@ class FormAssembler(abc.ABC):
 
         self._form = form
         self._tensor = tensor
-        self._bcs = solving._extract_bcs(bcs)
+        self._bcs = bcs
         self._form_compiler_params = form_compiler_parameters or {}
         self._needs_zeroing = needs_zeroing
 

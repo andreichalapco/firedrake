@@ -616,11 +616,9 @@ class LocalLoopyKernelBuilder(object):
 
             else:
                 f = slate_tensor.form if isinstance(slate_tensor.form, tuple) else (slate_tensor.form,)
-
                 coeff = tuple(coefficients[c] for c in f)
                 offset = 0
                 ismixed = tuple((type(c.ufl_element()) == MixedElement) for c in f)
-
                 names = []
                 for (im, c) in zip(ismixed, coeff):
                     names += [name for (name, ext) in c.values()] if im else [c[0]]
@@ -703,7 +701,6 @@ class LocalLoopyKernelBuilder(object):
                                                     read_only=True,
                                                     initializer=np.arange(self.num_facets, dtype=np.uint32),))
 
-        # TODO There are two args added here but only one in assemble?
         if self.bag.needs_mesh_layers:
             layer_loopy_arg = loopy.GlobalArg(self.layer_count_name, shape=(),
                                               dtype=np.int32)
