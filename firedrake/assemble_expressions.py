@@ -288,13 +288,13 @@ class Assign(object):
         """Tuple of par_loop arguments for the expression."""
         args = []
         if isinstance(self, AugmentedAssign) or self.lvalue in self.rcoefficients:
-            args.append(DatLegacyArg(weakref.ref(self.lvalue.dat), None, access=op2.RW))
+            args.append(self.lvalue.dat(access=op2.RW))
         else:
-            args.append(DatLegacyArg(weakref.ref(self.lvalue.dat), None, access=op2.WRITE))
+            args.append(self.lvalue.dat(access=op2.WRITE))
         for c in self.rcoefficients:
             if c.dat == self.lvalue.dat:
                 continue
-            args.append(DatLegacyArg(weakref.ref(c.dat), None, access=op2.READ))
+            args.append(c.dat(access=op2.READ))
         return tuple(args)
 
     @cached_property
@@ -479,8 +479,8 @@ def evaluate_expression(expr, subset=None):
         if arguments is not None:
             try:
                 for kernel, iterset, args in arguments:
-                    with dereffed(args) as args:
-                        firedrake.op2.par_loop(kernel, subset or iterset, *args)
+                    # with dereffed(args) as args:
+                    firedrake.op2.par_loop(kernel, subset or iterset, *args)
                 return lvalue
             except ReferenceError:
                 # TODO: Is there a situation where some of the kernels
@@ -491,8 +491,8 @@ def evaluate_expression(expr, subset=None):
         cache[slow_key] = arguments
         cache[fast_key] = arguments
     for kernel, iterset, args in arguments:
-        with dereffed(args) as args:
-            firedrake.op2.par_loop(kernel, subset or iterset, *args)
+        # with dereffed(args) as args:
+        firedrake.op2.par_loop(kernel, subset or iterset, *args)
     return lvalue
 
 

@@ -111,7 +111,6 @@ def allocate_matrix(expr, bcs=None, *, mat_type=None, sub_mat_type=None,
 
        Do not use this function unless you know what you're doing.
     """
-    import pdb; pdb.set_trace()
     bcs = bcs or ()
     appctx = appctx or {}
 
@@ -245,12 +244,12 @@ def _assemble_form(form, tensor=None, bcs=None, *,
                               options_prefix=options_prefix)
 
     # TODO Explain this
-    key = bcs, diagonal, form_compiler_parameters
+    key = tuple(bcs), diagonal, tuplify(form_compiler_parameters)
     try:
         assembler = form._cache[_FORM_CACHE_KEY][key]
         # The old assembler may be using a different tensor so we swap it out here
-        assembler.replace_tensor(tensor)
-        return assembler.assemble()
+        # assembler.replace_tensor(tensor)
+        # return assembler.assemble()
     except KeyError:
         pass
 
@@ -258,7 +257,8 @@ def _assemble_form(form, tensor=None, bcs=None, *,
     if rank == 0:
         assembler = ZeroFormAssembler(form, tensor, form_compiler_parameters)
     elif rank == 1 or (rank == 2 and diagonal):
-        assembler = OneFormAssembler(form, tensor, bcs, diagonal, form_compiler_parameters)
+        assembler = OneFormAssembler(form, tensor, bcs, diagonal=diagonal,
+                                     form_compiler_parameters=form_compiler_parameters)
     elif rank == 2:
         assembler = TwoFormAssembler(form, tensor, bcs, form_compiler_parameters)
     else:
@@ -272,10 +272,10 @@ def _assemble_form(form, tensor=None, bcs=None, *,
 
 
 def _check_inputs(form, tensor, bcs, diagonal):
-    if any(isinstance(bc, EquationBC) for bc in bcs):
-        raise TypeError("EquationBC objects not expected here. Preprocess by "
-                        "extracting the appropriate form with bc.extract_form('Jp') "
-                        "or bc.extract_form('J')")
+    # if any(isinstance(bc, EquationBC) for bc in bcs):
+    #     raise TypeError("EquationBC objects not expected here. Preprocess by "
+    #                     "extracting the appropriate form with bc.extract_form('Jp') "
+    #                     "or bc.extract_form('J')")
 
     # Ensure mesh is 'initialised' as we could have got here without building a
     # function space (e.g. if integrating a constant).
@@ -347,6 +347,8 @@ class FormAssembler(abc.ABC):
 
     def __init__(self, form, tensor, bcs=(), form_compiler_parameters=None, needs_zeroing=True):
         assert tensor is not None
+
+        bcs = solving._extract_bcs(bcs)
 
         self._form = form
         self._tensor = tensor
@@ -488,8 +490,9 @@ class OneFormAssembler(FormAssembler):
     For all other arguments see :class:`FormAssembler` for more information.
     """
 
-    def __init__(self, form, tensor, bcs=(), diagonal=False, zero_bc_nodes=False, **kwargs):
-        super().__init__(form, tensor, bcs, **kwargs)
+    def __init__(self, form, tensor, bcs=(), diagonal=False, zero_bc_nodes=False,
+                 form_compiler_parameters=None, needs_zeroing=True):
+        super().__init__(form, tensor, bcs, form_compiler_parameters, needs_zeroing)
         self._diagonal = diagonal
         self._zero_bc_nodes = zero_bc_nodes
 
@@ -511,7 +514,7 @@ class OneFormAssembler(FormAssembler):
             bc.zero(self._tensor)
 
             type(self)(bc.f, self._tensor, bc.bcs, self._diagonal, self._zero_bc_nodes,
-                       self._form_compiler_params, needs_zeroing=self._needs_zeroing).assemble()
+                       self._form_compiler_params, needs_zeroing=False).assemble()
         else:
             raise AssertionError
 
@@ -526,7 +529,6 @@ class OneFormAssembler(FormAssembler):
 
 
 def TwoFormAssembler(form, tensor, *args, **kwargs):
-    import pdb; pdb.set_trace()
     if isinstance(tensor, matrix.ImplicitMatrix):
         return MatrixFreeAssembler(tensor)
     else:
@@ -599,7 +601,7 @@ class ExplicitMatrixAssembler(FormAssembler):
             self._apply_dirichlet_bc(bc)
         elif isinstance(bc, EquationBCSplit):
             type(self)(bc.f, self._tensor, bc.bcs, self._form_compiler_params,
-                       needs_zeroing=self._needs_zeroing).assemble()
+                       needs_zeroing=False).assemble()
         else:
             raise AssertionError
 

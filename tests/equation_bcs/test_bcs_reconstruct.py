@@ -1,8 +1,5 @@
 from firedrake import *
 
-from petsc4py import PETSc
-PETSc.Sys.popErrorHandler()
-
 
 def test_bc_on_sub_sub_domain():
 
