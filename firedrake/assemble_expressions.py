@@ -11,6 +11,7 @@ from gem.impero_utils import compile_gem, preprocess_gem
 from gem.node import MemoizerArg
 from gem.node import traversal as gem_traversal
 from pyop2 import op2
+from pyop2.parloop import DatLegacyArg
 from tsfc import ufl2gem
 from tsfc.loopy import generate
 from tsfc.ufl_utils import ufl_reuse_if_untouched
@@ -287,13 +288,13 @@ class Assign(object):
         """Tuple of par_loop arguments for the expression."""
         args = []
         if isinstance(self, AugmentedAssign) or self.lvalue in self.rcoefficients:
-            args.append(self.lvalue.dat(access=op2.RW))
+            args.append(DatLegacyArg(weakref.ref(self.lvalue.dat), None, access=op2.RW))
         else:
-            args.append(self.lvalue.dat(access=op2.WRITE))
+            args.append(DatLegacyArg(weakref.ref(self.lvalue.dat), None, access=op2.WRITE))
         for c in self.rcoefficients:
             if c.dat == self.lvalue.dat:
                 continue
-            args.append(c.dat(access=op2.READ))
+            args.append(DatLegacyArg(weakref.ref(c.dat), None, access=op2.READ))
         return tuple(args)
 
     @cached_property
@@ -437,6 +438,23 @@ def pointwise_expression_kernel(exprs, scalar_type):
     return firedrake.op2.Kernel(knl, name), plargs
 
 
+class dereffed:
+    def __init__(self, args):
+        self.args = args
+
+    def __enter__(self):
+        for a in self.args:
+            data = a.data()
+            if data is None:
+                raise ReferenceError
+            a.data = a.data()
+        return self.args
+
+    def __exit__(self, *args, **kwargs):
+        for a in self.args:
+            a.data = weakref.ref(a.data)
+
+
 @PETSc.Log.EventDecorator()
 @known_pyop2_safe
 def evaluate_expression(expr, subset=None):
@@ -461,7 +479,8 @@ def evaluate_expression(expr, subset=None):
         if arguments is not None:
             try:
                 for kernel, iterset, args in arguments:
-                    firedrake.op2.par_loop(kernel, subset or iterset, *args)
+                    with dereffed(args) as args:
+                        firedrake.op2.par_loop(kernel, subset or iterset, *args)
                 return lvalue
             except ReferenceError:
                 # TODO: Is there a situation where some of the kernels
@@ -472,7 +491,8 @@ def evaluate_expression(expr, subset=None):
         cache[slow_key] = arguments
         cache[fast_key] = arguments
     for kernel, iterset, args in arguments:
-        firedrake.op2.par_loop(kernel, subset or iterset, *args)
+        with dereffed(args) as args:
+            firedrake.op2.par_loop(kernel, subset or iterset, *args)
     return lvalue
 
 
