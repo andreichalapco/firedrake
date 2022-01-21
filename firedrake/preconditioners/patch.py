@@ -212,9 +212,7 @@ def matrix_funptr(form, state):
             args.append(arg)
         iterset = op2.Subset(iterset, [])
 
-        wrapper_knl_args = []
-        for a in args:
-            wrapper_knl_args.append(a.global_kernel_arg)
+        wrapper_knl_args = tuple(a.global_kernel_arg for a in args)
         mod = op2.GlobalKernel(kinfo.kernel, wrapper_knl_args, subset=True)
         kernels.append(CompiledKernel(mod.compile(iterset.comm), kinfo))
     return cell_kernels, int_facet_kernels
@@ -301,7 +299,7 @@ def residual_funptr(form, state):
             args.append(arg)
         iterset = op2.Subset(iterset, [])
 
-        wrapper_knl_args = [a.global_kernel_arg for a in args]
+        wrapper_knl_args = tuple(a.global_kernel_arg for a in args)
         mod = op2.GlobalKernel(kinfo.kernel, wrapper_knl_args, subset=True)
         kernels.append(CompiledKernel(mod.compile(iterset.comm), kinfo))
     return cell_kernels, int_facet_kernels

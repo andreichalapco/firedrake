@@ -180,13 +180,9 @@ def generate_loopy_kernel(slate_expr, compiler_parameters=None):
     loopy_merged = loopy.register_callable(loopy_merged, INVCallable.name, INVCallable())
     loopy_merged = loopy.register_callable(loopy_merged, SolveCallable.name, SolveCallable())
 
-    pyop2_kernel = tsfc_interface.as_pyop2_local_kernel(
-        loopy_merged,
-        name,
-        arguments,
-        include_dirs=BLASLAPACK_INCLUDE.split(),
-        ldargs=BLASLAPACK_LIB.split()
-    )
+    loopykernel = tsfc_interface.as_pyop2_local_kernel(loopy_merged, name, len(arguments),
+                                                       include_dirs=BLASLAPACK_INCLUDE.split(),
+                                                       ldargs=BLASLAPACK_LIB.split())
 
     # map the coefficients in the order that PyOP2 needs
     new_coeffs = slate_expr.coefficients()
@@ -194,7 +190,7 @@ def generate_loopy_kernel(slate_expr, compiler_parameters=None):
     get_index = lambda n: orig_coeffs.index(new_coeffs[n]) if new_coeffs[n] in orig_coeffs else n
     coeff_map = tuple((get_index(n), split_map) for (n, split_map) in slate_expr.coeff_map)
 
-    kinfo = KernelInfo(kernel=pyop2_kernel,
+    kinfo = KernelInfo(kernel=loopykernel,
                        integral_type="cell",  # slate can only do things as contributions to the cell integrals
                        oriented=builder.bag.needs_cell_orientations,
                        subdomain_id="otherwise",

@@ -19,15 +19,6 @@ from firedrake.functionspacedata import get_shared_data, create_element
 from firedrake.petsc import PETSc
 
 
-def needs_cargo(func):
-    def wrapper(self, *args, **kwargs):
-        if self.cargo is not None:
-            return func(self, *args, **kwargs)
-        else:
-            raise TypeError("Operation is not available for stripped forms")
-    return wrapper
-
-
 class WithGeometry(ufl.FunctionSpace):
     r"""Attach geometric information to a :class:`~.FunctionSpace`.
 
@@ -69,31 +60,27 @@ class WithGeometry(ufl.FunctionSpace):
         cargo = FunctionSpaceCargo(topological, parent)
         return cls(mesh, element, component=component, cargo=cargo)
 
-    # @utils.cached_property
-    # def finat_element(self):
-    #     raise NotImplementedError("Make sure this is the tensor-valued version")
-    #     return create_element(self.ufl_element())
-
-    # @utils.cached_property
-    # def scalar_finat_element(self):
-    #     raise NotImplementedError
-
     def _ufl_signature_data_(self, *args, **kwargs):
-        return (type(self),
-                self.component,
+        return (type(self), self.component,
                 super()._ufl_signature_data_(*args, **kwargs))
 
     @property
-    @needs_cargo
     def parent(self):
         return self.cargo.parent
 
+    @parent.setter
+    def parent(self, val):
+        self.cargo.parent = val
+
     @property
-    @needs_cargo
     def topological(self):
         return self.cargo.topological
 
-    @utils.cached_property  # TODO
+    @topological.setter
+    def topological(self, val):
+        self.cargo.topological = val
+
+    @utils.cached_property
     def _split(self):
         return tuple(WithGeometry.create(subspace, self.mesh())
                      for subspace in self.topological.split())
@@ -117,7 +104,7 @@ class WithGeometry(ufl.FunctionSpace):
         r"""Split into a tuple of constituent spaces."""
         return self._split
 
-    @property
+    @utils.cached_property
     def _components(self):
         if len(self) == 1:
             return tuple(WithGeometry.create(self.topological.sub(i), self.mesh())
@@ -135,7 +122,7 @@ class WithGeometry(ufl.FunctionSpace):
             raise IndexError("Invalid component %d, not in [0, %d)" % (i, bound))
         return self._components[i]
 
-    @utils.cached_property  # TODO
+    @utils.cached_property
     def dm(self):
         dm = self._dm()
         dmhooks.set_function_space(dm, self)
@@ -1001,6 +988,12 @@ class RealFunctionSpace(FunctionSpace):
 
 @dataclass
 class FunctionSpaceCargo:
+    """Helper class carrying data for a :class:`WithGeometry`.
+
+    It is required because it permits Firedrake to have stripped forms
+    that still know Firedrake-specific information (e.g. that they are a
+    component of a parent function space).
+    """
 
     topological: FunctionSpace
     parent: Optional[WithGeometry]

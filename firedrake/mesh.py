@@ -1353,6 +1353,11 @@ class VertexOnlyMeshTopology(AbstractMeshTopology):
 
 
 class MeshGeometryCargo:
+    """Helper class carrying data for a :class:`MeshGeometry`.
+
+    It is required because it permits Firedrake to have stripped forms
+    that still know that they are on an extruded mesh (for example).
+    """
 
     def __init__(self, ufl_id):
         self._ufl_id = ufl_id
@@ -1360,12 +1365,15 @@ class MeshGeometryCargo:
     def ufl_id(self):
         return self._ufl_id
 
-    # Other properties that get attached:
-    # - topology
-    # - _coordinates
-    # - _geometric_shared_data_cache
-    # - _coordinates_function
-    # - _parent_mesh  (VertexOnly only)
+    def init(self, coordinates):
+        """Initialise the cargo.
+
+        This function is separate to __init__ because of the two-step process we have
+        for initialising a :class:`MeshGeometry`.
+        """
+        self.topology = coordinates.function_space().mesh()
+        self.coordinates = coordinates
+        self.geometric_shared_data_cache = defaultdict(dict)
 
 
 class MeshGeometry(ufl.Mesh, MeshGeometryMixin):
@@ -1388,20 +1396,17 @@ class MeshGeometry(ufl.Mesh, MeshGeometryMixin):
 
         :arg coordinates: a coordinateless function containing the coordinates
         """
-        cargo = self.ufl_cargo()
-        # Direct link to topology
-        cargo.topology = coordinates.function_space().mesh()
+        topology = coordinates.function_space().mesh()
 
-        # This is codegen information so we attach it to the MeshGeometry rather than
-        # its cargo.
-        self.extruded = isinstance(cargo.topology, ExtrudedMeshTopology)
-        self.variable_layers = self.extruded and cargo.topology.variable_layers
+        # this is codegen information so we attach it to the MeshGeometry rather than its cargo
+        self.extruded = isinstance(topology, ExtrudedMeshTopology)
+        self.variable_layers = self.extruded and topology.variable_layers
+
+        # initialise the mesh cargo
+        self.ufl_cargo().init(coordinates)
 
         # Cache mesh object on the coordinateless coordinates function
         coordinates._as_mesh_geometry = weakref.ref(self)
-
-        cargo._coordinates = coordinates
-        cargo._geometric_shared_data_cache = defaultdict(dict)
 
     def _ufl_signature_data_(self, *args, **kwargs):
         return (type(self), self.extruded, self.variable_layers,
@@ -1426,13 +1431,12 @@ class MeshGeometry(ufl.Mesh, MeshGeometryMixin):
 
     @property
     def _topology(self):
-        return self.ufl_cargo().topology
+        return self.topology
 
     @_topology.setter
     def _topology(self, val):
-        self.ufl_cargo().topology = val
+        self.topology = val
 
-    # Fix for vertex-only meshes
     @property
     def _parent_mesh(self):
         return self.ufl_cargo()._parent_mesh
@@ -1443,18 +1447,18 @@ class MeshGeometry(ufl.Mesh, MeshGeometryMixin):
 
     @property
     def _coordinates(self):
-        return self.ufl_cargo()._coordinates
+        return self.ufl_cargo().coordinates
 
     @property
     def _geometric_shared_data_cache(self):
-        return self.ufl_cargo()._geometric_shared_data_cache
+        return self.ufl_cargo().geometric_shared_data_cache
 
     @property
     def topological(self):
         """Alias of topology.
 
         This is to ensure consistent naming for some multigrid codes."""
-        return self.topology
+        return self._topology
 
     @property
     def _topology_dm(self):
@@ -1463,10 +1467,6 @@ class MeshGeometry(ufl.Mesh, MeshGeometryMixin):
         warn("_topology_dm is deprecated (use topology_dm instead)", DeprecationWarning, stacklevel=2)
         return self.topology_dm
 
-    """TODO
-    This is the next thing to fix. For some reason things do not work if I move this stuff
-    into the cargo.
-    """
     @property
     @MeshGeometryMixin._ad_annotate_coordinates_function
     def _coordinates_function(self):
@@ -1500,7 +1500,7 @@ values from f.)"""
 
         raise AttributeError(message)
 
-    @utils.cached_property  # TODO Move this to the cargo
+    @utils.cached_property
     def cell_sizes(self):
         """A :class`~.Function` in the :math:`P^1` space containing the local mesh size.
 
@@ -1531,7 +1531,7 @@ values from f.)"""
         except AttributeError:
             pass
 
-    @utils.cached_property  # TODO Move this to the cargo
+    @utils.cached_property
     def spatial_index(self):
         """Spatial index to quickly find which cell contains a given point."""
 
@@ -1860,7 +1860,7 @@ def Mesh(meshfile, **kwargs):
     element = ufl.VectorElement("Lagrange", cell, 1)
     # Create mesh object
     mesh = MeshGeometry.__new__(MeshGeometry, element)
-    mesh.topology = topology
+    mesh._topology = topology
 
     def callback(self):
         """Finish initialisation."""

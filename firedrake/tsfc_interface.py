@@ -79,7 +79,7 @@ class TSFCKernel(Cached):
             val = None
             if os.path.exists(filepath):
                 try:
-                    with gzip.open(filepath, "rb") as f:
+                    with gzip.open(filepath, 'rb') as f:
                         val = f.read()
                 except zlib.error:
                     pass
@@ -105,7 +105,7 @@ class TSFCKernel(Cached):
             # No need for a barrier after this, since non root
             # processes will never race on this file.
             os.makedirs(os.path.join(cls._cachedir, shard), exist_ok=True)
-            with gzip.open(tempfile, "wb") as f:
+            with gzip.open(tempfile, 'wb') as f:
                 pickle.dump(val, f, 0)
             os.rename(tempfile, filepath)
         comm.barrier()
@@ -124,12 +124,10 @@ class TSFCKernel(Cached):
                     + str(diagonal)).encode()).hexdigest(), form.ufl_domains()[0].comm
 
     def __init__(self, form, name, parameters, number_map, interface, coffee=False, diagonal=False):
-        """A wrapper object for one or more TSFC kernels compiled from a given :class:`~ufl.classes.F
-rm`.
+        """A wrapper object for one or more TSFC kernels compiled from a given :class:`~ufl.classes.Form`.
 
         :arg form: the :class:`~ufl.classes.Form` from which to compile the kernels.
-        :arg name: a prefix to be applied to the compiled kernel names. This is primarily useful for
-ebugging.
+        :arg name: a prefix to be applied to the compiled kernel names. This is primarily useful for debugging.
         :arg parameters: a dict of parameters to pass to the form compiler.
         :arg number_map: a map from local coefficient numbers
                          to the split global coefficient numbers.
@@ -147,7 +145,7 @@ ebugging.
             # Unwind coefficient numbering
             numbers = tuple(number_map[c] for c in kernel.coefficient_numbers)
             pyop2_kernel = as_pyop2_local_kernel(kernel.ast, kernel.name,
-                                                 kernel.arguments,
+                                                 len(kernel.arguments),
                                                  flop_count=kernel.flop_count,
                                                  opts=opts)
             kernels.append(KernelInfo(kernel=pyop2_kernel,
@@ -278,11 +276,12 @@ def _ensure_cachedir(comm=None):
 
 
 def gather_integer_subdomain_ids(knls):
-    """TODO
+    """Gather a dict of all integer subdomain IDs per integral type.
+
+    This is needed to correctly interpret the ``"otherwise"`` subdomain ID.
 
     :arg knls: Iterable of :class:`SplitKernel` objects.
     """
-    # These will be used to correctly interpret the "otherwise" subdomain
     all_integer_subdomain_ids = collections.defaultdict(list)
     for _, kinfo in knls:
         if kinfo.subdomain_id != "otherwise":
@@ -293,9 +292,15 @@ def gather_integer_subdomain_ids(knls):
     return all_integer_subdomain_ids
 
 
-def as_pyop2_local_kernel(ast, name, arguments, access=op2.INC, **kwargs):
-    """TODO"""
+def as_pyop2_local_kernel(ast, name, nargs, access=op2.INC, **kwargs):
+    """Convert a loopy kernel to a PyOP2 :class:`pyop2.LocalKernel`.
+
+    :arg ast: The kernel code. This could be, for example, a loopy kernel.
+    :arg name: The kernel name.
+    :arg nargs: The number of arguments expected by the kernel.
+    :arg access: Access descriptor for the first kernel argument.
+    """
     # all but the first argument to the kernel are read-only
-    accesses = tuple([access] + [op2.READ]*len(arguments[1:]))
+    accesses = tuple([access] + [op2.READ]*(nargs-1))
     return op2.Kernel(ast, name, accesses=accesses,
                       requires_zeroed_output_arguments=True, **kwargs)
