@@ -511,11 +511,8 @@ class _SNESContext(object):
     @cached_property
     def _assemble_jac(self):
         from firedrake.assemble import TwoFormAssembler, MatrixFreeAssembler
-        if self.matfree:
-            return MatrixFreeAssembler(self._jac).assemble
-        else:
-            return TwoFormAssembler(self.J, self._jac, bcs=self.bcs_J,
-                                    form_compiler_parameters=self.fcp).assemble
+        return TwoFormAssembler(self.J, self._jac, bcs=self.bcs_J,
+                                form_compiler_parameters=self.fcp).assemble
 
     @cached_property
     def is_mixed(self):
@@ -537,12 +534,8 @@ class _SNESContext(object):
     @cached_property
     def _assemble_pjac(self):
         from firedrake.assemble import TwoFormAssembler, MatrixFreeAssembler
-
-        if self.pmatfree:
-            return MatrixFreeAssembler(self._pjac).assemble
-        else:
-            return TwoFormAssembler(self.Jp, self._pjac, bcs=self.bcs_Jp,
-                                    form_compiler_parameters=self.fcp).assemble
+        return TwoFormAssembler(self.Jp, self._pjac, bcs=self.bcs_Jp,
+                                form_compiler_parameters=self.fcp).assemble
 
     @cached_property
     def _F(self):

@@ -111,6 +111,7 @@ def allocate_matrix(expr, bcs=None, *, mat_type=None, sub_mat_type=None,
 
        Do not use this function unless you know what you're doing.
     """
+    import pdb; pdb.set_trace()
     bcs = bcs or ()
     appctx = appctx or {}
 
@@ -231,60 +232,106 @@ def _assemble_form(form, tensor=None, bcs=None, *,
 
     See :func:`assemble` for a description of the arguments to this function.
     """
-    # we can disregard mat_type etc in the cache key since these only matter if tensor is None
+    bcs = solving._extract_bcs(bcs)
+
+    _check_inputs(form, tensor, bcs, diagonal)
+
+    if tensor is not None:
+        _zero_tensor(tensor, form, diagonal)
+    else:
+        tensor = _make_tensor(form, bcs, diagonal=diagonal, mat_type=mat_type,
+                              sub_mat_type=sub_mat_type, appctx=appctx,
+                              form_compiler_parameters=form_compiler_parameters,
+                              options_prefix=options_prefix)
+
+    # TODO Explain this
     key = bcs, diagonal, form_compiler_parameters
     try:
-        old_key, old_tensor, assembler = form._cache[_FORM_CACHE_KEY]
-        if old_key == key and old_tensor is tensor:
-            return assembler.assemble()
+        assembler = form._cache[_FORM_CACHE_KEY][key]
+        # The old assembler may be using a different tensor so we swap it out here
+        assembler.replace_tensor(tensor)
+        return assembler.assemble()
     except KeyError:
         pass
 
     rank = len(form.arguments())
     if rank == 0:
-        if len(form.arguments()) != 0:
-            raise ValueError("Cannot assemble a 0-form with arguments")
-        assert tensor is None
-        assert not bcs
-
-        tensor = op2.Global(1, [0.0], dtype=utils.ScalarType)
         assembler = ZeroFormAssembler(form, tensor, form_compiler_parameters)
     elif rank == 1 or (rank == 2 and diagonal):
-        if diagonal:
-            test, trial = form.arguments()
-            if test.function_space() != trial.function_space():
-                raise ValueError("Can only assemble the diagonal of 2-form if the "
-                                 "function spaces match")
-        else:
-            test, = form.arguments()
-
-        if tensor is not None:
-            if test.function_space() != tensor.function_space():
-                raise ValueError("Form's argument does not match provided result tensor")
-        else:
-            tensor = firedrake.Function(test.function_space())
         assembler = OneFormAssembler(form, tensor, bcs, diagonal, form_compiler_parameters)
     elif rank == 2:
-        if tensor is not None:
-            if tensor.a.arguments() != form.arguments():
-                raise ValueError("Form's arguments do not match provided result tensor")
-
-        if tensor is None:
-            mat_type, sub_mat_type = _get_mat_type(mat_type, sub_mat_type, form.arguments())
-            tensor = allocate_matrix(form, bcs, mat_type=mat_type,
-                                     sub_mat_type=sub_mat_type, appctx=appctx,
-                                     form_compiler_parameters=form_compiler_parameters,
-                                     options_prefix=options_prefix)
-
-        if isinstance(tensor, matrix.ImplicitMatrix):
-            assembler = MatrixFreeAssembler(tensor)
-        else:
-            assembler = TwoFormAssembler(form, tensor, bcs, form_compiler_parameters)
+        assembler = TwoFormAssembler(form, tensor, bcs, form_compiler_parameters)
     else:
         raise AssertionError
 
-    form._cache[_FORM_CACHE_KEY] = key, tensor, assembler
+    if _FORM_CACHE_KEY not in form._cache:
+        form._cache[_FORM_CACHE_KEY] = {}
+
+    form._cache[_FORM_CACHE_KEY][key] = assembler
     return assembler.assemble()
+
+
+def _check_inputs(form, tensor, bcs, diagonal):
+    if any(isinstance(bc, EquationBC) for bc in bcs):
+        raise TypeError("EquationBC objects not expected here. Preprocess by "
+                        "extracting the appropriate form with bc.extract_form('Jp') "
+                        "or bc.extract_form('J')")
+
+    # Ensure mesh is 'initialised' as we could have got here without building a
+    # function space (e.g. if integrating a constant).
+    for mesh in form.ufl_domains():
+        mesh.init()
+
+    rank = len(form.arguments())
+    if rank == 0:
+        assert tensor is None
+        assert not bcs
+    elif rank == 1:
+        test, = form.arguments()
+
+        if tensor is not None and test.function_space() != tensor.function_space():
+            raise ValueError("Form's argument does not match provided result tensor")
+    elif rank == 2 and diagonal:
+        test, trial = form.arguments()
+        if test.function_space() != trial.function_space():
+            raise ValueError("Can only assemble the diagonal of 2-form if the function spaces match")
+    elif rank == 2:
+        if tensor is not None and tensor.a.arguments() != form.arguments():
+            raise ValueError("Form's arguments do not match provided result tensor")
+    else:
+        raise AssertionError
+
+
+def _zero_tensor(tensor, form, diagonal):
+    rank = len(form.arguments())
+    assert rank != 0
+    if rank == 1 or (rank == 2 and diagonal):
+        tensor.dat.zero()
+    elif rank == 2:
+        if not isinstance(tensor, matrix.ImplicitMatrix):
+            tensor.M.zero()
+    else:
+        raise AssertionError
+
+
+def _make_tensor(form, bcs, *, diagonal, mat_type, sub_mat_type, appctx,
+                 form_compiler_parameters, options_prefix):
+    rank = len(form.arguments())
+    if rank == 0:
+        return op2.Global(1, [0.0], dtype=utils.ScalarType)
+    elif rank == 1:
+        test, = form.arguments()
+        return firedrake.Function(test.function_space())
+    elif rank == 2 and diagonal:
+        test, _ = form.arguments()
+        return firedrake.Function(test.function_space())
+    elif rank == 2:
+        mat_type, sub_mat_type = _get_mat_type(mat_type, sub_mat_type, form.arguments())
+        return allocate_matrix(form, bcs, mat_type=mat_type, sub_mat_type=sub_mat_type,
+                               appctx=appctx, form_compiler_parameters=form_compiler_parameters,
+                               options_prefix=options_prefix)
+    else:
+        raise AssertionError
 
 
 class FormAssembler(abc.ABC):
@@ -300,22 +347,21 @@ class FormAssembler(abc.ABC):
 
     def __init__(self, form, tensor, bcs=(), form_compiler_parameters=None, needs_zeroing=True):
         assert tensor is not None
-        bcs = solving._extract_bcs(bcs)
-
-        if any(isinstance(bc, EquationBC) for bc in bcs):
-            raise TypeError("EquationBC objects not expected here. "
-                            "Preprocess by extracting the appropriate form with bc.extract_form('Jp') or bc.extract_form('J')")
-
-        # Ensure mesh is 'initialised' as we could have got here without building a
-        # function space (e.g. if integrating a constant).
-        for mesh in form.ufl_domains():
-            mesh.init()
 
         self._form = form
         self._tensor = tensor
         self._bcs = bcs
         self._form_compiler_params = form_compiler_parameters or {}
         self._needs_zeroing = needs_zeroing
+
+    def replace_tensor(self, tensor):
+        if tensor is self._tensor:
+            return
+
+        # TODO We should have some proper checks here
+        for parloop in self.parloops:
+            parloop.arguments[0].data = self._as_pyop2_type(tensor)
+        self._tensor = tensor
 
     @property
     @abc.abstractmethod
@@ -327,17 +373,13 @@ class FormAssembler(abc.ABC):
     def diagonal(self):
         """Are we assembling the diagonal of a 2-form?"""
 
-    @abc.abstractmethod
-    def zero_tensor(self):
-        """Set ``tensor`` to zero."""
-
     def assemble(self):
         """Perform the assembly.
 
         :returns: The assembled object.
         """
         if self._needs_zeroing:
-            self.zero_tensor()
+            self._as_pyop2_type(self._tensor).zero()
 
         for parloop in self.parloops:
             parloop()
@@ -409,6 +451,17 @@ class FormAssembler(abc.ABC):
         """
         return None
 
+    @staticmethod
+    def _as_pyop2_type(tensor):
+        if isinstance(tensor, op2.Global):
+            return tensor
+        elif isinstance(tensor, firedrake.Function):
+            return tensor.dat
+        elif isinstance(tensor, matrix.Matrix):
+            return tensor.M
+        else:
+            raise AssertionError
+
 
 class ZeroFormAssembler(FormAssembler):
     """Class for assembling a 0-form."""
@@ -423,9 +476,6 @@ class ZeroFormAssembler(FormAssembler):
     def result(self):
         return self._tensor.data[0]
 
-    def zero_tensor(self):
-        self._tensor.zero()
-
 
 class OneFormAssembler(FormAssembler):
     """Class for assembling a 1-form.
@@ -438,9 +488,8 @@ class OneFormAssembler(FormAssembler):
     For all other arguments see :class:`FormAssembler` for more information.
     """
 
-    def __init__(self, form, tensor, bcs=(), diagonal=False, zero_bc_nodes=False,
-                 form_compiler_parameters=None, needs_zeroing=True):
-        super().__init__(form, tensor, bcs, form_compiler_parameters, needs_zeroing)
+    def __init__(self, form, tensor, bcs=(), diagonal=False, zero_bc_nodes=False, **kwargs):
+        super().__init__(form, tensor, bcs, **kwargs)
         self._diagonal = diagonal
         self._zero_bc_nodes = zero_bc_nodes
 
@@ -452,9 +501,6 @@ class OneFormAssembler(FormAssembler):
     def result(self):
         return self._tensor
 
-    def zero_tensor(self):
-        self._tensor.dat.zero()
-
     def _apply_bc(self, bc):
         # TODO Maybe this could be a singledispatchmethod?
         if isinstance(bc, DirichletBC):
@@ -465,7 +511,7 @@ class OneFormAssembler(FormAssembler):
             bc.zero(self._tensor)
 
             type(self)(bc.f, self._tensor, bc.bcs, self._diagonal, self._zero_bc_nodes,
-                       self._form_compiler_params, needs_zeroing=False).assemble()
+                       self._form_compiler_params, needs_zeroing=self._needs_zeroing).assemble()
         else:
             raise AssertionError
 
@@ -480,6 +526,7 @@ class OneFormAssembler(FormAssembler):
 
 
 def TwoFormAssembler(form, tensor, *args, **kwargs):
+    import pdb; pdb.set_trace()
     if isinstance(tensor, matrix.ImplicitMatrix):
         return MatrixFreeAssembler(tensor)
     else:
@@ -491,9 +538,6 @@ class ExplicitMatrixAssembler(FormAssembler):
 
     diagonal = False
     """Diagonal assembly not possible for two forms."""
-
-    def zero_tensor(self):
-        self._tensor.M.zero()
 
     @property
     def test_function_space(self):
@@ -555,7 +599,7 @@ class ExplicitMatrixAssembler(FormAssembler):
             self._apply_dirichlet_bc(bc)
         elif isinstance(bc, EquationBCSplit):
             type(self)(bc.f, self._tensor, bc.bcs, self._form_compiler_params,
-                       needs_zeroing=False).assemble()
+                       needs_zeroing=self._needs_zeroing).assemble()
         else:
             raise AssertionError
 
@@ -598,6 +642,7 @@ class MatrixFreeAssembler:
     def assemble(self):
         self._tensor.assemble()
         return self._tensor
+
 
 
 def _global_kernel_cache_key(form, local_knl, all_integer_subdomain_ids, **kwargs):
