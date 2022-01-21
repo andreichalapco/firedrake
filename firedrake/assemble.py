@@ -248,8 +248,8 @@ def _assemble_form(form, tensor=None, bcs=None, *,
     try:
         assembler = form._cache[_FORM_CACHE_KEY][key]
         # The old assembler may be using a different tensor so we swap it out here
-        # assembler.replace_tensor(tensor)
-        # return assembler.assemble()
+        assembler.replace_tensor(tensor)
+        return assembler.assemble()
     except KeyError:
         pass
 
@@ -801,15 +801,16 @@ class _GlobalKernelBuilder:
         else:
             return (1,)
 
-    def _make_dat_global_kernel_arg(self, finat_element):
+    def _make_dat_global_kernel_arg(self, finat_element, index=None):
         if isinstance(finat_element, finat.EnrichedElement) and finat_element.is_mixed:
+            assert index is None
             subargs = tuple(self._make_dat_global_kernel_arg(subelem.element)
                             for subelem in finat_element.elements)
             return op2.MixedDatKernelArg(subargs)
         else:
             dim = self._get_dim(finat_element)
             map_arg = self._get_map_arg(finat_element)
-            return op2.DatKernelArg(dim, map_arg)
+            return op2.DatKernelArg(dim, map_arg, index)
 
     def _make_mat_global_kernel_arg(self, relem, celem):
         if any(isinstance(e, finat.EnrichedElement) and e.is_mixed for e in {relem, celem}):
@@ -882,12 +883,19 @@ def _as_global_kernel_arg_coordinates(_, self):
 @_as_global_kernel_arg.register(kernel_args.CoefficientKernelArg)
 def _as_global_kernel_arg_coefficient(_, self):
     coeff = next(self._active_coefficients)
-    ufl_element = coeff.ufl_element()
+    V = coeff.ufl_function_space()
+    if hasattr(V, "component") and V.component is not None:
+        index = V.component,
+        V = V.parent
+    else:
+        index = None
+
+    ufl_element = V.ufl_element()
     if ufl_element.family() == "Real":
         return op2.GlobalKernelArg((ufl_element.value_size(),))
     else:
-        finat_element = create_element(coeff.ufl_function_space().ufl_element())
-        return self._make_dat_global_kernel_arg(finat_element)
+        finat_element = create_element(ufl_element)
+        return self._make_dat_global_kernel_arg(finat_element, index)
 
 
 @_as_global_kernel_arg.register(kernel_args.CellSizesKernelArg)
