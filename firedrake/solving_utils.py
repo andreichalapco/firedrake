@@ -510,7 +510,7 @@ class _SNESContext(object):
 
     @cached_property
     def _assemble_jac(self):
-        from firedrake.assemble import TwoFormAssembler, MatrixFreeAssembler
+        from firedrake.assemble import TwoFormAssembler
         return TwoFormAssembler(self.J, self._jac, bcs=self.bcs_J,
                                 form_compiler_parameters=self.fcp).assemble
 
@@ -533,7 +533,7 @@ class _SNESContext(object):
 
     @cached_property
     def _assemble_pjac(self):
-        from firedrake.assemble import TwoFormAssembler, MatrixFreeAssembler
+        from firedrake.assemble import TwoFormAssembler
         return TwoFormAssembler(self.Jp, self._pjac, bcs=self.bcs_Jp,
                                 form_compiler_parameters=self.fcp).assemble
 

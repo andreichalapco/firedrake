@@ -243,15 +243,27 @@ def _assemble_form(form, tensor=None, bcs=None, *,
                               form_compiler_parameters=form_compiler_parameters,
                               options_prefix=options_prefix)
 
-    # TODO Explain this
-    key = tuple(bcs), diagonal, tuplify(form_compiler_parameters)
-    try:
-        assembler = form._cache[_FORM_CACHE_KEY][key]
-        # The old assembler may be using a different tensor so we swap it out here
-        assembler.replace_tensor(tensor)
-        return assembler.assemble()
-    except KeyError:
-        pass
+    # It is expensive to construct new assemblers because extracting the data
+    # from the form is slow. Since all of the data structures in the assembler
+    # are persistent apart from the output tensor, we stash the assembler on the
+    # form and swap out the tensor if needed.
+    # The cache key only needs to contain the boundary conditions, diagonal and
+    # form compiler parameters since all other assemble kwargs are only used for
+    # creating the tensor which is handled above and has no bearing on the assembler.
+    # Note: This technically creates a memory leak since bcs are 'heavy' and so
+    # repeated assembly of the same form but with different boundary conditions
+    # will lead to old bcs getting stored along with old tensors.
+
+    # FIXME This only works for 1-forms at the moment
+    is_cacheable = len(form.arguments()) == 1
+    if is_cacheable:
+        try:
+            key = tuple(bcs), diagonal, tuplify(form_compiler_parameters)
+            assembler = form._cache[_FORM_CACHE_KEY][key]
+            assembler.replace_tensor(tensor)
+            return assembler.assemble()
+        except KeyError:
+            pass
 
     rank = len(form.arguments())
     if rank == 0:
@@ -264,19 +276,15 @@ def _assemble_form(form, tensor=None, bcs=None, *,
     else:
         raise AssertionError
 
-    if _FORM_CACHE_KEY not in form._cache:
-        form._cache[_FORM_CACHE_KEY] = {}
+    if is_cacheable:
+        if _FORM_CACHE_KEY not in form._cache:
+            form._cache[_FORM_CACHE_KEY] = {}
+        form._cache[_FORM_CACHE_KEY][key] = assembler
 
-    form._cache[_FORM_CACHE_KEY][key] = assembler
     return assembler.assemble()
 
 
 def _check_inputs(form, tensor, bcs, diagonal):
-    # if any(isinstance(bc, EquationBC) for bc in bcs):
-    #     raise TypeError("EquationBC objects not expected here. Preprocess by "
-    #                     "extracting the appropriate form with bc.extract_form('Jp') "
-    #                     "or bc.extract_form('J')")
-
     # Ensure mesh is 'initialised' as we could have got here without building a
     # function space (e.g. if integrating a constant).
     for mesh in form.ufl_domains():
@@ -356,15 +364,6 @@ class FormAssembler(abc.ABC):
         self._form_compiler_params = form_compiler_parameters or {}
         self._needs_zeroing = needs_zeroing
 
-    def replace_tensor(self, tensor):
-        if tensor is self._tensor:
-            return
-
-        # TODO We should have some proper checks here
-        for parloop in self.parloops:
-            parloop.arguments[0].data = self._as_pyop2_type(tensor)
-        self._tensor = tensor
-
     @property
     @abc.abstractmethod
     def result(self):
@@ -392,6 +391,16 @@ class FormAssembler(abc.ABC):
             self._apply_bc(bc)
 
         return self.result
+
+    def replace_tensor(self, tensor):
+        if tensor is self._tensor:
+            return
+
+        # TODO We should have some proper checks here
+        for lknl, parloop in zip(self.local_kernels, self.parloops):
+            data = _FormHandler.index_tensor(tensor, self._form, lknl.indices, self.diagonal)
+            parloop.arguments[0].data = data
+        self._tensor = tensor
 
     @cached_property
     def local_kernels(self):
@@ -644,7 +653,6 @@ class MatrixFreeAssembler:
     def assemble(self):
         self._tensor.assemble()
         return self._tensor
-
 
 
 def _global_kernel_cache_key(form, local_knl, all_integer_subdomain_ids, **kwargs):
