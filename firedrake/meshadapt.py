@@ -326,7 +326,7 @@ class MetricBasedAdaptor(AdaptorBase):
         self.metric.enforce_spd(restrict_sizes=True, restrict_anisotropy=True)
         metric = self.metric.reordered
         newplex = plex.adaptMetric(metric, "Face Sets", "Cell Sets")
-        return fmesh.Mesh(newplex)
+        return fmesh.Mesh(newplex, distribution_parameters={"partition": False})
 
     @PETSc.Log.EventDecorator("MetricBasedAdaptor.interpolate")
     def interpolate(self, f):
