@@ -57,3 +57,130 @@ class Metric(object):
         used to drive the mesh adaptation routine.
         """
         pass
+
+
+
+class RiemannianMetric(Metric):
+    r"""
+    Class for defining a Riemannian metric over a
+    given mesh.
+
+    A metric is a symmetric positive-definite field,
+    which conveys how the mesh is to be adapted. If
+    the mesh is of dimension :math:`d` then the metric
+    takes the value of a square :math:`d\times d`
+    matrix at each point.
+
+    The implementation of metric-based mesh adaptation
+    used in PETSc assumes that the metric is piece-wise
+    linear and continuous, with its degrees of freedom
+    at the mesh vertices.
+
+    For details, see the PETSc manual entry:
+      https://petsc.org/release/docs/manual/dmplex.html#metric-based-mesh-adaptation
+    """
+    @PETSc.Log.EventDecorator("RiemannianMetric.__init__")
+    def __init__(self, mesh, metric_parameters={}):
+        """
+        :arg mesh: mesh upon which to build the metric
+        :kwarg metric_parameters: PETSc parameters for
+            metric construction
+        """
+        super().__init__(mesh, metric_parameters=metric_parameters)
+        self.V = fs.TensorFunctionSpace(mesh, 'CG', 1)
+        self.function = func.Function(self.V)
+
+    @property
+    def dat(self):
+        return self.function.dat
+
+    @property
+    def vec(self):
+        with self.dat.vec_ro as v:
+            return v
+
+    @property
+    @PETSc.Log.EventDecorator("RiemannianMetric.reordered")
+    def reordered(self):
+        return dmcommon.to_petsc_local_numbering(self.vec, self.V)
+
+    @staticmethod
+    def _process_parameters(metric_parameters):
+        mp = metric_parameters.copy()
+        if 'dm_plex_metric' in mp:
+            for key, value in mp['dm_plex_metric'].items():
+                mp['_'.join(['dm_plex_metric', key])] = value
+            mp.pop('dm_plex_metric')
+        return mp
+
+    def set_metric_parameters(self, metric_parameters={}):
+        """
+        Apply the :attr:`metric_parameters` to the DMPlex.
+        """
+        mp = self._process_parameters(metric_parameters)
+        OptDB = PETSc.Options()
+        for key, value in mp.items():
+            OptDB.setValue(key, value)
+        self.plex.metricSetFromOptions()
+
+    @PETSc.Log.EventDecorator("RiemannianMetric.enforce_spd")
+    def enforce_spd(self, restrict_sizes=False, restrict_anisotropy=False):
+        """
+        Enforce that the metric is symmetric positive-definite.
+
+        :kwarg restrict_sizes: should minimum and maximum metric magnitudes
+            be enforced?
+        :kwarg restrict_anisotropy: should maximum anisotropy be enforced?
+        """
+        tmp = self.plex.metricEnforceSPD(
+            self.vec, restrictSizes=restrict_sizes, restrictAnisotropy=restrict_anisotropy,
+        )
+        with self.dat.vec_wo as v:
+            v.copy(tmp)
+        return self
+
+    @PETSc.Log.EventDecorator("RiemannianMetric.normalise")
+    def normalise(self, restrict_sizes=False, restrict_anisotropy=False):
+        raise NotImplementedError  # TODO
+
+    @PETSc.Log.EventDecorator("RiemannianMetric.intersect")
+    def intersect(self, *metrics):
+        """
+        Intersect the metric with other metrics.
+
+        Metric intersection means taking the minimal ellipsoid in the
+        direction of each eigenvector at each point in the domain.
+
+        :arg metrics: the metrics to be intersected with
+        """
+        for metric in metrics:
+            assert isinstance(metric, RiemannianMetric)
+        num_metrics = len(metrics)
+        if num_metrics == 0:
+            return self
+        elif num_metrics == 1:
+            tmp = self.plex.metricIntersection2(self.vec, metrics[0].vec)
+        elif num_metrics == 2:
+            tmp = self.plex.metricIntersection3(self.vec, metrics[0].vec, metrics[1].vec)
+        else:
+            raise NotImplementedError(f'Can only intersect 1, 2 or 3 metrics, not {num_metrics+1}')
+        with self.dat.vec_wo as v:
+            v.copy(tmp)
+        return self
+
+    def rename(self, name):
+        self.function.rename(name)
+        with self.dat.vec_wo as v:
+            v.setName(name)
+
+    def assign(self, *args, **kwargs):
+        self.function.assign(*args, **kwargs)
+        return self
+
+    def interpolate(self, *args, **kwargs):
+        self.function.interpolate(*args, **kwargs)
+        return self
+
+    def project(self, *args, **kwargs):
+        self.function.project(*args, **kwargs)
+        return self
