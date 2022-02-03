@@ -34,3 +34,28 @@ def test_intersection(dim):
     expected = RiemannianMetric(mesh)
     expected.interpolate(100.0*Id)
     assert np.isclose(errornorm(metric1.function, expected.function), 0.0)
+
+
+def test_size_restriction(dim):
+    """
+    Test that enforcing a minimum magnitude
+    larger than the domain means that there
+    are as few elements as possible.
+    """
+    Id = Identity(dim)
+    mesh = uniform_mesh(dim)
+    mp = {'dm_plex_metric_h_min': 2.0}
+    metric = RiemannianMetric(mesh, metric_parameters=mp)
+    metric.interpolate(100.0*Id)
+    metric.enforce_spd(restrict_sizes=True)
+    expected = RiemannianMetric(mesh)
+    expected.interpolate(0.25*Id)
+    # assert np.isclose(errornorm(metric.function, expected.function), 0.0)
+    try:
+        newmesh = adapt(mesh, metric)
+    except PETSc.Error as exc:
+        if exc.ierr == 63:
+            pytest.xfail("No mesh adaptation tools are installed")
+        else:
+            raise Exception(f"PETSc error code {exc.ierr}")
+    assert newmesh.num_cells() < mesh.num_cells()
